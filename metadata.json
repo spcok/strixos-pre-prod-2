@@ -1,0 +1,8 @@
+{
+  "name": "Remix Pre-prod StrixOS - 17/8/2026",
+  "description": "StrixOS - Management system for Kent Owl Academy.\n\nbeta version",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
