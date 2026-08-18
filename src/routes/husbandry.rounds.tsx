@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual'; 
 import { 
   CheckCircle2, AlertCircle, Droplets, Lock, HeartPulse, 
-  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, Users, User
+  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, Users, User, ChevronDown
 } from 'lucide-react';
 import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
@@ -127,13 +127,11 @@ function DailyRounds() {
 
   // ==========================================
   // BULLETPROOF DYNAMIC VIRTUALIZER
-  // Automatically measures the real DOM height of every row
-  // Impossible for text to overlap buttons.
   // ==========================================
   const virtualizer = useVirtualizer({
     count: displayAnimals.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 140, // Base estimate, auto-corrects based on true height
+    estimateSize: () => isMobile ? 110 : 70, 
     overscan: 5,
   });
 
@@ -198,6 +196,7 @@ function DailyRounds() {
 
       const roundsToSubmit: Partial<DailyRound>[] = Object.values(draftRounds).map(draft => {
         const dbRound = rounds.find(r => r.animal_id === draft.animal_id);
+        
         return {
           id: dbRound?.id,
           animal_id: draft.animal_id,
@@ -207,7 +206,7 @@ function DailyRounds() {
           water_checked: draft.water_checked !== undefined ? draft.water_checked : (dbRound?.water_checked ?? false),
           locks_secured: draft.locks_secured !== undefined ? draft.locks_secured : (dbRound?.locks_secured ?? false),
           animal_issue_note: draft.animal_issue_note !== undefined ? draft.animal_issue_note : dbRound?.animal_issue_note,
-          conducted_by: user.id 
+          completed_by: user.id // SCHEMA FIX: Mapped strictly to V3 DB column
         };
       });
 
@@ -226,251 +225,257 @@ function DailyRounds() {
   };
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 md:space-y-4 animate-in fade-in duration-500 max-w-7xl mx-auto w-full">
+    <div className="max-w-[1600px] w-full mx-auto h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 px-4 md:px-8">
       
-      <div className="flex justify-between items-center w-full portrait:flex landscape:hidden md:landscape:flex">
+      {/* Block A: Header Ribbon */}
+      <div className="flex justify-between items-center w-full mb-1 portrait:flex landscape:hidden lg:landscape:flex shrink-0 pt-4 md:pt-6">
         <div className="shrink-0 pr-4">
-           <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight">Daily Rounds</h1>
+           <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight">Daily Rounds</h1>
         </div>
       </div>
 
-      <div className="flex flex-col sm:flex-row flex-wrap gap-2 md:gap-3 w-full bg-slate-50/80 p-2 md:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden md:landscape:flex">
+      {/* Block B: Control Deck */}
+      <div className="flex flex-col sm:flex-row flex-wrap gap-2 lg:gap-3 w-full bg-slate-50/80 p-2 lg:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden lg:landscape:flex shrink-0">
         
-        <div className="relative flex-1 min-w-[200px]">
+        <div className="relative flex-1 min-w-[200px] lg:w-96 shrink-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
           <input 
             type="text" 
             placeholder="Search animals..." 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs md:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all shadow-sm placeholder:text-slate-400"
+            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs lg:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all shadow-sm placeholder:text-slate-400"
           />
         </div>
 
-        <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full sm:w-auto shrink-0">
-          <button onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronLeft size={16} /></button>
-          <div className="flex-1 sm:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[120px]">
-            <input 
-              type="date" 
-              value={inputDate}
-              onChange={(e) => setInputDate(e.target.value)}
-              onBlur={(e) => handleDateChange(e.target.value)}
-              className="bg-transparent border-none text-[10px] md:text-xs font-bold text-slate-700 focus:outline-none focus:ring-0 py-1 cursor-pointer w-full text-center"
-            />
-          </div>
-          <button onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronRight size={16} /></button>
-        </div>
-
-        <div className="flex bg-slate-200/50 p-1 rounded-xl w-full sm:w-auto shrink-0">
-          <button
-            onClick={() => setActiveShift('MORNING')}
-            className={`flex-1 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeShift === 'MORNING' 
-                ? 'bg-white text-emerald-600 shadow-sm' 
-                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
-            }`}
-          >
-            AM Shift
-          </button>
-          <button
-            onClick={() => setActiveShift('AFTERNOON')}
-            className={`flex-1 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeShift === 'AFTERNOON' 
-                ? 'bg-white text-emerald-600 shadow-sm' 
-                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
-            }`}
-          >
-            PM Shift
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 md:flex md:gap-2 w-full shrink-0 gap-1.5">
-        {tabs.map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-1 md:px-4 py-1.5 md:py-2 rounded-xl text-[9px] md:text-xs font-black uppercase tracking-widest whitespace-nowrap md:whitespace-normal transition-all shadow-sm ${
-              activeTab === tab 
-                ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
-                : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 relative overflow-hidden">
-        
-        {isLoading && (
-          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-10 flex flex-col items-center justify-center">
-            <Loader2 className="animate-spin text-emerald-500 mb-4" size={32} />
-            <p className="text-slate-500 font-medium animate-pulse">Syncing offline queue...</p>
-          </div>
-        )}
-
-        <div ref={parentRef} className="flex-1 overflow-y-auto overflow-x-hidden relative custom-scrollbar">
-          
-          {displayAnimals.length === 0 && !isLoading ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center text-slate-500">
-              <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center mb-4 border border-slate-200">
-                <Search size={24} className="text-slate-400" />
-              </div>
-              <p className="font-bold text-slate-700 mb-1">No collections found</p>
-              <p className="text-xs">Adjust your search or filters.</p>
+        <div className="flex flex-col sm:flex-row items-center gap-2 sm:ml-auto w-full sm:w-auto">
+          <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full sm:w-auto shrink-0">
+            <button onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronLeft size={16} /></button>
+            <div className="flex-1 sm:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[120px]">
+              <input 
+                type="date" 
+                value={inputDate}
+                onChange={(e) => setInputDate(e.target.value)}
+                onBlur={(e) => handleDateChange(e.target.value)}
+                className="text-[10px] lg:text-xs font-black text-slate-700 uppercase tracking-widest bg-transparent border-none focus:ring-0 text-center py-1 cursor-pointer w-full"
+              />
             </div>
-          ) : (
-            <div
-              style={{
-                height: `${virtualizer.getTotalSize()}px`,
-                width: '100%',
-                position: 'relative',
-              }}
+            <button onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronRight size={16} /></button>
+          </div>
+
+          <div className="flex bg-slate-200/50 p-1 rounded-xl w-full sm:w-auto shrink-0">
+            <button
+              onClick={() => setActiveShift('MORNING')}
+              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all ${
+                activeShift === 'MORNING' 
+                  ? 'bg-white text-emerald-600 shadow-sm' 
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+              }`}
             >
-              {virtualizer.getVirtualItems().map((virtualItem) => {
-                const animal = displayAnimals[virtualItem.index];
-                const dbRound = rounds.find(r => r.animal_id === animal.id);
-                const draft = draftRounds[animal.id];
-                const mergedRound = draft ? { ...dbRound, ...draft } : dbRound;
+              AM Shift
+            </button>
+            <button
+              onClick={() => setActiveShift('AFTERNOON')}
+              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all ${
+                activeShift === 'AFTERNOON' 
+                  ? 'bg-white text-emerald-600 shadow-sm' 
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+              }`}
+            >
+              PM Shift
+            </button>
+          </div>
+        </div>
+      </div>
 
-                const isGroup = animal.record_type === 'GROUP';
-                const isAlive = mergedRound?.is_alive !== undefined ? mergedRound.is_alive : true;
-                const waterChecked = mergedRound?.water_checked !== undefined ? mergedRound.water_checked : false;
-                const locksSecured = mergedRound?.locks_secured !== undefined ? mergedRound.locks_secured : false;
-                const hasNote = !!mergedRound?.animal_issue_note;
+      {/* Block C: Category Tabs */}
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col flex-1 overflow-hidden min-h-0">
+        <div className="flex border-b border-slate-100 bg-slate-50 shrink-0 overflow-x-auto custom-scrollbar">
+          {tabs.map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 lg:px-6 py-3 lg:py-4 text-[10px] lg:text-[11px] font-black uppercase tracking-widest transition-all border-b-2 whitespace-nowrap ${
+                activeTab === tab ? 'border-emerald-500 text-emerald-600 bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.02)]' : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-100/50'
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
 
-                return (
-                  <div
-                    key={animal.id}
-                    data-index={virtualItem.index}
-                    ref={virtualizer.measureElement} // DYNAMIC MEASUREMENT FIX
-                    className="absolute top-0 left-0 w-full border-b border-slate-100 hover:bg-slate-50/50 transition-colors box-border"
-                    style={{
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    
-                    {/* UNIFIED FLUID LAYOUT 
-                      - Mobile: Portrait Identity stacked above a 2x2 Button Grid
-                      - Tablets/Desktop: Identity aligns left, Buttons align right in a row
-                    */}
-                    <div className="w-full p-4 md:p-6 flex flex-col lg:flex-row gap-4 lg:items-center">
-                      
-                      {/* IDENTITY BLOCK */}
-                      <div className="flex items-center gap-3 w-full lg:w-1/3 shrink-0 min-w-0">
-                        {animal.profile_image_url ? (
-                          <img src={animal.profile_image_url} className="w-12 h-12 md:w-14 md:h-14 rounded-full object-cover shrink-0 border border-slate-200 shadow-sm" alt="" />
-                        ) : (
-                          <div className={`w-12 h-12 md:w-14 md:h-14 rounded-full flex items-center justify-center shrink-0 border shadow-sm ${isGroup ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
-                            {isGroup ? <Users size={20} /> : <User size={20} />}
-                          </div>
-                        )}
-                        
-                        <div className="min-w-0 flex flex-col justify-center flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-slate-900 text-sm md:text-base tracking-tight break-words">{animal.name}</span>
-                            {hasNote && <AlertCircle size={16} className="text-amber-500 shrink-0" />}
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[10px] md:text-xs text-slate-500 truncate mt-0.5">
-                            {animal.ring_number && <span className="font-black text-slate-400 uppercase tracking-widest">{animal.ring_number}</span>}
-                            {animal.ring_number && animal.species && <span>•</span>}
-                            {animal.species && <span className="italic truncate" title={animal.species}>{animal.species}</span>}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* ACTIONS BLOCK: 2x2 Grid on Mobile, Flex Row on Tablet/Desktop */}
-                      <div className="grid grid-cols-2 md:flex md:flex-row flex-1 gap-2 md:gap-3 lg:justify-end">
-                        
-                        <button
-                          onClick={() => handleToggle(animal.id, 'is_alive')}
-                          className={`flex items-center justify-center md:justify-start gap-2 p-3 rounded-xl border shadow-sm transition-all md:flex-1 lg:flex-none lg:w-[150px] ${
-                            isAlive 
-                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
-                              : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
-                          }`}
-                        >
-                          {isAlive ? <HeartPulse size={16} className="shrink-0" /> : <AlertCircle size={16} className="shrink-0" />}
-                          <span className="text-[10px] md:text-xs font-black uppercase tracking-widest truncate">{isAlive ? 'Visual: OK' : 'Visual: ISSUE'}</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleToggle(animal.id, 'water_checked')}
-                          className={`flex items-center justify-center md:justify-start gap-2 p-3 rounded-xl border shadow-sm transition-all md:flex-1 lg:flex-none lg:w-[150px] ${
-                            waterChecked 
-                              ? 'bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100' 
-                              : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                          }`}
-                        >
-                          <Droplets size={16} className={`shrink-0 ${!waterChecked ? 'text-slate-400' : ''}`} />
-                          <span className="text-[10px] md:text-xs font-black uppercase tracking-widest truncate">{waterChecked ? 'Water: OK' : 'Check Water'}</span>
-                        </button>
-
-                        <button
-                          onClick={() => handleToggle(animal.id, 'locks_secured')}
-                          className={`flex items-center justify-center md:justify-start gap-2 p-3 rounded-xl border shadow-sm transition-all md:flex-1 lg:flex-none lg:w-[150px] ${
-                            locksSecured 
-                              ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
-                              : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                          }`}
-                        >
-                          <Lock size={16} className={`shrink-0 ${!locksSecured ? 'text-slate-400' : ''}`} />
-                          <span className="text-[10px] md:text-xs font-black uppercase tracking-widest truncate">{locksSecured ? 'Locks: OK' : 'Check Locks'}</span>
-                        </button>
-
-                        <button
-                          onClick={() => setNoteModalState({ isOpen: true, animal, round: mergedRound as DailyRound, currentNote: mergedRound?.animal_issue_note || '' })}
-                          className={`flex items-center justify-center md:justify-start gap-2 p-3 rounded-xl border shadow-sm transition-all md:flex-1 lg:flex-none lg:w-[140px] ${
-                            hasNote 
-                              ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
-                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
-                          }`}
-                        >
-                          {hasNote ? <AlertCircle size={16} className="shrink-0" /> : <Edit3 size={16} className="shrink-0 text-slate-400" />}
-                          <span className="text-[10px] md:text-xs font-black uppercase tracking-widest truncate">{hasNote ? 'Note Logged' : 'Add Note'}</span>
-                        </button>
-
-                      </div>
-
-                    </div>
-                  </div>
-                );
-              })}
+        {/* Block D: Data List */}
+        <div className="flex-1 overflow-hidden relative bg-white">
+          
+          {isLoading && (
+            <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-10 flex flex-col items-center justify-center">
+              <Loader2 className="animate-spin text-emerald-500 mb-4" size={32} />
+              <p className="text-slate-500 font-medium animate-pulse text-sm">Syncing offline queue...</p>
             </div>
           )}
-        </div>
 
-        {/* --- FIXED BOTTOM SUBMIT BAR --- */}
-        <div className="border-t border-slate-200 bg-white p-3 md:p-4 flex items-center justify-between z-20 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-          <div className="flex-1 min-w-0 pr-4">
-             {hasUnsavedChanges ? (
-               <div className="flex items-center gap-2 text-amber-600">
-                 <AlertCircle size={16} className="shrink-0" />
-                 <span className="text-[10px] md:text-xs font-bold truncate">Unsaved checks detected</span>
-               </div>
-             ) : submissionStatus ? (
-               <div className={`flex items-center gap-2 ${submissionStatus.type === 'success' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                 <CheckCircle2 size={16} className="shrink-0" />
-                 <span className="text-[10px] md:text-xs font-bold truncate">{submissionStatus.message}</span>
-               </div>
-             ) : (
-               <span className="text-[10px] md:text-xs text-slate-500 truncate block">All checks synced to database.</span>
-             )}
+          <div ref={parentRef} className="h-full overflow-y-auto overflow-x-hidden custom-scrollbar">
+            
+            {displayAnimals.length === 0 && !isLoading ? (
+              <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500">
+                <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center mb-4 border border-slate-200">
+                  <Search size={24} className="text-slate-400" />
+                </div>
+                <p className="font-bold text-slate-700 mb-1">No collections found</p>
+                <p className="text-xs">Adjust your search or filters.</p>
+              </div>
+            ) : (
+              <div
+                style={{
+                  height: `${virtualizer.getTotalSize()}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualizer.getVirtualItems().map((virtualItem) => {
+                  const animal = displayAnimals[virtualItem.index];
+                  const dbRound = rounds.find(r => r.animal_id === animal.id);
+                  const draft = draftRounds[animal.id];
+                  const mergedRound = draft ? { ...dbRound, ...draft } : dbRound;
+
+                  const isGroup = animal.record_type === 'GROUP';
+                  const isAlive = mergedRound?.is_alive !== undefined ? mergedRound.is_alive : true;
+                  const waterChecked = mergedRound?.water_checked !== undefined ? mergedRound.water_checked : false;
+                  const locksSecured = mergedRound?.locks_secured !== undefined ? mergedRound.locks_secured : false;
+                  const hasNote = !!mergedRound?.animal_issue_note;
+
+                  return (
+                    <div
+                      key={animal.id}
+                      data-index={virtualItem.index}
+                      ref={virtualizer.measureElement}
+                      className="absolute top-0 left-0 w-full border-b border-slate-100 hover:bg-slate-50/50 transition-colors box-border"
+                      style={{
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      <div className="w-full px-4 py-2 lg:py-2.5 flex flex-col lg:flex-row gap-3 lg:gap-4 lg:items-center">
+                        
+                        {/* UNIFIED IDENTITY BLOCK (Scaled to match Dashboard) */}
+                        <div className="flex items-center gap-1.5 lg:gap-3 w-full lg:w-[35%] shrink-0 min-w-0">
+                          <div className="relative shrink-0">
+                            {animal.profile_image_url ? (
+                              <img src={animal.profile_image_url} className="w-8 h-8 lg:w-10 lg:h-10 rounded-full object-cover shrink-0 shadow-sm border border-slate-200 mt-0.5" alt="" />
+                            ) : (
+                              <div className={`p-2 lg:p-2.5 rounded-full shrink-0 shadow-sm mt-0.5 ${isGroup ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'bg-slate-50 text-slate-400 border border-slate-200'}`}>
+                                {isGroup ? <Users size={14} className="lg:w-4 lg:h-4" /> : <User size={14} className="lg:w-4 lg:h-4" />}
+                              </div>
+                            )}
+                            {isGroup && (
+                              <div className="absolute -bottom-1 -right-1 w-3 h-3 lg:w-4 lg:h-4 bg-blue-500 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
+                                <Users size={8} className="text-white" />
+                              </div>
+                            )}
+                          </div>
+                          
+                          <div className="flex flex-col min-w-0 flex-1 ml-2 lg:ml-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-slate-900 text-[11px] md:text-[12px] lg:text-[13px] truncate">{animal.name}</span>
+                              {hasNote && <AlertCircle size={12} className="text-amber-500 shrink-0 lg:w-3.5 lg:h-3.5" />}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[9px] md:text-[10px] lg:text-[11px] text-slate-500 truncate mt-0.5">
+                              {animal.ring_number && <span className="font-black text-slate-400 uppercase tracking-widest">{animal.ring_number}</span>}
+                              {animal.ring_number && animal.species && <span>•</span>}
+                              {animal.species && <span className="italic truncate" title={animal.species}>{animal.species}</span>}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* PROPORTIONAL ACTIONS BLOCK */}
+                        <div className="grid grid-cols-2 lg:flex lg:flex-row flex-1 gap-2 lg:gap-3 lg:justify-end">
+                          <button
+                            onClick={() => handleToggle(animal.id, 'is_alive')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                              isAlive 
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
+                                : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                            }`}
+                          >
+                            {isAlive ? <HeartPulse size={12} className="shrink-0 lg:w-3.5 lg:h-3.5" /> : <AlertCircle size={12} className="shrink-0 lg:w-3.5 lg:h-3.5" />}
+                            <span className="text-[9px] lg:text-[10px] font-black uppercase tracking-widest truncate">{isAlive ? 'Visual: OK' : 'Visual: ISSUE'}</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleToggle(animal.id, 'water_checked')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                              waterChecked 
+                                ? 'bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100' 
+                                : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          >
+                            <Droplets size={12} className={`shrink-0 lg:w-3.5 lg:h-3.5 ${!waterChecked ? 'text-slate-400' : ''}`} />
+                            <span className="text-[9px] lg:text-[10px] font-black uppercase tracking-widest truncate">{waterChecked ? 'Water: OK' : 'Check Water'}</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleToggle(animal.id, 'locks_secured')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                              locksSecured 
+                                ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
+                                : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          >
+                            <Lock size={12} className={`shrink-0 lg:w-3.5 lg:h-3.5 ${!locksSecured ? 'text-slate-400' : ''}`} />
+                            <span className="text-[9px] lg:text-[10px] font-black uppercase tracking-widest truncate">{locksSecured ? 'Locks: OK' : 'Check Locks'}</span>
+                          </button>
+
+                          <button
+                            onClick={() => setNoteModalState({ isOpen: true, animal, round: mergedRound as DailyRound, currentNote: mergedRound?.animal_issue_note || '' })}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[120px] ${
+                              hasNote 
+                                ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
+                                : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {hasNote ? <AlertCircle size={12} className="shrink-0 lg:w-3.5 lg:h-3.5" /> : <Edit3 size={12} className="shrink-0 lg:w-3.5 lg:h-3.5 text-slate-400" />}
+                            <span className="text-[9px] lg:text-[10px] font-black uppercase tracking-widest truncate">{hasNote ? 'Note Logged' : 'Add Note'}</span>
+                          </button>
+                        </div>
+
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          
-          <button
-            onClick={handleSubmit}
-            disabled={!hasUnsavedChanges || isSubmitting}
-            className={`px-6 py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm ${
-              hasUnsavedChanges && !isSubmitting
-                ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:shadow-md active:scale-95'
-                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            }`}
-          >
-            {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-            Submit Rounds
-          </button>
+
+          {/* --- FIXED BOTTOM SUBMIT BAR --- */}
+          <div className="absolute bottom-0 left-0 right-0 border-t border-slate-200 bg-white/95 backdrop-blur p-3 md:p-4 flex items-center justify-between z-20 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+            <div className="flex-1 min-w-0 pr-4">
+               {hasUnsavedChanges ? (
+                 <div className="flex items-center gap-2 text-amber-600">
+                   <AlertCircle size={16} className="shrink-0" />
+                   <span className="text-[10px] md:text-xs font-bold truncate">Unsaved checks detected</span>
+                 </div>
+               ) : submissionStatus ? (
+                 <div className={`flex items-center gap-2 ${submissionStatus.type === 'success' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                   <CheckCircle2 size={16} className="shrink-0" />
+                   <span className="text-[10px] md:text-xs font-bold truncate">{submissionStatus.message}</span>
+                 </div>
+               ) : (
+                 <span className="text-[10px] md:text-xs text-slate-500 truncate block">All checks synced to database.</span>
+               )}
+            </div>
+            
+            <button
+              onClick={handleSubmit}
+              disabled={!hasUnsavedChanges || isSubmitting}
+              className={`px-6 py-2.5 lg:py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm ${
+                hasUnsavedChanges && !isSubmitting
+                  ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:shadow-md active:scale-95'
+                  : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+              Submit Rounds
+            </button>
+          </div>
         </div>
       </div>
 
