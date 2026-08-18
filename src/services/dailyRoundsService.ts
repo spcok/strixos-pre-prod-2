@@ -15,11 +15,11 @@ export const dailyRoundsService = {
   },
 
   async bulkUpsertRounds(rounds: Partial<DailyRound>[]) {
-    // Supabase upsert automatically merges existing records based on unique constraints
-    // This replaces all the manual loop/merge logic we had previously
+    // 🚨 FIXED: Supabase will now safely use the Primary Key ('id') to determine 
+    // whether to INSERT a new round or UPDATE an existing one.
     const { data, error } = await supabase
       .from('daily_rounds')
-      .upsert(rounds, { onConflict: 'animal_id,date,shift' })
+      .upsert(rounds, { onConflict: 'id' }) 
       .select();
 
     if (error) throw error;

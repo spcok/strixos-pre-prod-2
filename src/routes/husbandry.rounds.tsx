@@ -141,7 +141,7 @@ function DailyRounds() {
         event: '*', 
         schema: 'public', 
         table: 'daily_rounds',
-        filter: `record_date=eq.${activeDate}` 
+        filter: `date=eq.${activeDate}` // 🚨 SCHEMA FIX: Corrected from record_date to date
       }, () => {
         queryClient.invalidateQueries({ queryKey: ['rounds', activeDate, activeShift] });
       })
@@ -196,17 +196,22 @@ function DailyRounds() {
 
       const roundsToSubmit: Partial<DailyRound>[] = Object.values(draftRounds).map(draft => {
         const dbRound = rounds.find(r => r.animal_id === draft.animal_id);
+        const isEdit = !!dbRound?.id;
         
         return {
           id: dbRound?.id,
           animal_id: draft.animal_id,
-          record_date: activeDate,
+          date: activeDate,             // 🚨 SCHEMA FIX: Corrected from record_date to date
           shift: activeShift,
           is_alive: draft.is_alive !== undefined ? draft.is_alive : (dbRound?.is_alive ?? true),
           water_checked: draft.water_checked !== undefined ? draft.water_checked : (dbRound?.water_checked ?? false),
           locks_secured: draft.locks_secured !== undefined ? draft.locks_secured : (dbRound?.locks_secured ?? false),
           animal_issue_note: draft.animal_issue_note !== undefined ? draft.animal_issue_note : dbRound?.animal_issue_note,
-          completed_by: user.id // SCHEMA FIX: Mapped strictly to V3 DB column
+          
+          status: 'COMPLETED',          // 🚨 SCHEMA FIX: Status is NOT NULL
+          completed_by: user.id,        // 🚨 SCHEMA FIX: Mapped to completed_by
+          created_by: isEdit ? dbRound.created_by : user.id,
+          modified_by: isEdit ? user.id : null,
         };
       });
 
@@ -225,10 +230,11 @@ function DailyRounds() {
   };
 
   return (
-    <div className="max-w-[1600px] w-full mx-auto h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 px-4 md:px-8">
+    // 🚨 LAYOUT FIX: Removed max-w constraints. It now expands fluidly into __root.tsx's space
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 w-full">
       
       {/* Block A: Header Ribbon */}
-      <div className="flex justify-between items-center w-full mb-1 portrait:flex landscape:hidden lg:landscape:flex shrink-0 pt-4 md:pt-6">
+      <div className="flex justify-between items-center w-full mb-1 portrait:flex landscape:hidden lg:landscape:flex shrink-0">
         <div className="shrink-0 pr-4">
            <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight">Daily Rounds</h1>
         </div>
