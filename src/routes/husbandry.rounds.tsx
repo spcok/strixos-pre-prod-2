@@ -4,7 +4,7 @@ import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual'; 
 import { 
   CheckCircle2, AlertCircle, Droplets, Lock, HeartPulse, 
-  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, Users, User, ChevronDown
+  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, Users, User
 } from 'lucide-react';
 import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
@@ -13,7 +13,19 @@ import { dailyRoundsService } from '../services/dailyRoundsService';
 import { Animal, DailyRound } from '../types';
 
 // ------------------------------------------------------------------
-// 1. STRICT OFFLINE QUERY OPTIONS
+// 1. SAFE UUID POLYFILL (For offline queueing on non-HTTPS networks)
+// ------------------------------------------------------------------
+const generateOfflineUUID = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
+// ------------------------------------------------------------------
+// 2. STRICT OFFLINE QUERY OPTIONS
 // ------------------------------------------------------------------
 const getAnimalsOptions = () => queryOptions({
   queryKey: ['animals', 'dashboard'],
@@ -38,7 +50,7 @@ const getRoundsOptions = (date: string, shift: 'MORNING' | 'AFTERNOON') => query
 });
 
 // ------------------------------------------------------------------
-// 2. ROUTE DEFINITION
+// 3. ROUTE DEFINITION
 // ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/rounds')({
   loader: async ({ context: { queryClient } }) => {
@@ -63,7 +75,7 @@ function useIsMobile() {
 }
 
 // ------------------------------------------------------------------
-// 3. MAIN COMPONENT
+// 4. MAIN COMPONENT
 // ------------------------------------------------------------------
 function DailyRounds() {
   const { user } = useAuth();
@@ -106,6 +118,16 @@ function DailyRounds() {
 
   const isLoading = loadingAnimals || loadingRounds;
 
+  // ==========================================
+  // O(1) HASH MAP OPTIMIZATION 
+  // Prevents CPU stutter when tapping checkboxes
+  // ==========================================
+  const roundsMap = useMemo(() => {
+    const map = new Map<string, DailyRound>();
+    rounds.forEach(r => map.set(r.animal_id, r));
+    return map;
+  }, [rounds]);
+
   const categories = useMemo(() => Array.from(new Set(animals.map(a => a.category).filter(Boolean))).sort(), [animals]);
   const tabs = ['ALL', ...categories];
 
@@ -141,7 +163,7 @@ function DailyRounds() {
         event: '*', 
         schema: 'public', 
         table: 'daily_rounds',
-        filter: `date=eq.${activeDate}` // 🚨 SCHEMA FIX: Corrected from record_date to date
+        filter: `date=eq.${activeDate}` 
       }, () => {
         queryClient.invalidateQueries({ queryKey: ['rounds', activeDate, activeShift] });
       })
@@ -159,14 +181,24 @@ function DailyRounds() {
   };
 
   const shiftDate = (days: number) => {
-    const newDate = format(addDays(parseISO(activeDate), days), 'yyyy-MM-dd');
-    handleDateChange(newDate);
+    // DST FIX: Use 12:00 PM to prevent midnight timezone boundary jumps
+    const parts = activeDate.split('-');
+    if (parts.length !== 3) return;
+    const [y, m, d] = parts.map(Number);
+    const dateObj = new Date(y, m - 1, d, 12, 0, 0); 
+    dateObj.setDate(dateObj.getDate() + days);
+
+    const newDateString = dateObj.getFullYear() + '-' +
+      String(dateObj.getMonth() + 1).padStart(2, '0') + '-' +
+      String(dateObj.getDate()).padStart(2, '0');
+
+    handleDateChange(newDateString);
   };
 
   const handleToggle = (animalId: string, field: keyof DailyRound) => {
     setDraftRounds(prev => {
       const existingDraft = prev[animalId];
-      const dbRound = rounds.find(r => r.animal_id === animalId);
+      const dbRound = roundsMap.get(animalId); // Fast O(1) lookup
       
       const currentState = existingDraft?.[field] !== undefined 
         ? existingDraft[field] 
@@ -195,21 +227,21 @@ function DailyRounds() {
       setSubmissionStatus(null);
 
       const roundsToSubmit: Partial<DailyRound>[] = Object.values(draftRounds).map(draft => {
-        const dbRound = rounds.find(r => r.animal_id === draft.animal_id);
+        const dbRound = roundsMap.get(draft.animal_id!); // Fast O(1) lookup
         const isEdit = !!dbRound?.id;
         
         return {
-          id: dbRound?.id,
+          id: dbRound?.id || generateOfflineUUID(), 
           animal_id: draft.animal_id,
-          date: activeDate,             // 🚨 SCHEMA FIX: Corrected from record_date to date
+          date: activeDate,             
           shift: activeShift,
           is_alive: draft.is_alive !== undefined ? draft.is_alive : (dbRound?.is_alive ?? true),
           water_checked: draft.water_checked !== undefined ? draft.water_checked : (dbRound?.water_checked ?? false),
           locks_secured: draft.locks_secured !== undefined ? draft.locks_secured : (dbRound?.locks_secured ?? false),
           animal_issue_note: draft.animal_issue_note !== undefined ? draft.animal_issue_note : dbRound?.animal_issue_note,
           
-          status: 'COMPLETED',          // 🚨 SCHEMA FIX: Status is NOT NULL
-          completed_by: user.id,        // 🚨 SCHEMA FIX: Mapped to completed_by
+          status: 'COMPLETED',          
+          completed_by: user.id,        
           created_by: isEdit ? dbRound.created_by : user.id,
           modified_by: isEdit ? user.id : null,
         };
@@ -230,7 +262,6 @@ function DailyRounds() {
   };
 
   return (
-    // 🚨 LAYOUT FIX: Removed max-w constraints. It now expands fluidly into __root.tsx's space
     <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 w-full">
       
       {/* Block A: Header Ribbon */}
@@ -294,23 +325,26 @@ function DailyRounds() {
         </div>
       </div>
 
-      {/* Block C: Category Tabs */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col flex-1 overflow-hidden min-h-0">
-        <div className="flex border-b border-slate-100 bg-slate-50 shrink-0 overflow-x-auto custom-scrollbar">
-          {tabs.map(tab => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 lg:px-6 py-3 lg:py-4 text-[10px] lg:text-[11px] font-black uppercase tracking-widest transition-all border-b-2 whitespace-nowrap ${
-                activeTab === tab ? 'border-emerald-500 text-emerald-600 bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.02)]' : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-100/50'
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
+      {/* Block C: Category Tabs (Perfectly matched to daily-logs) */}
+      <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full shrink-0 gap-1.5">
+        {tabs.map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm ${
+              activeTab === tab 
+                ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+                : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
 
-        {/* Block D: Data List */}
+      {/* Block D: Data List */}
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col flex-1 overflow-hidden min-h-0 relative mt-1">
+        
         <div className="flex-1 overflow-hidden relative bg-white">
           
           {isLoading && (
@@ -340,7 +374,8 @@ function DailyRounds() {
               >
                 {virtualizer.getVirtualItems().map((virtualItem) => {
                   const animal = displayAnimals[virtualItem.index];
-                  const dbRound = rounds.find(r => r.animal_id === animal.id);
+                  // O(1) Lookup - No more sluggish input lag
+                  const dbRound = roundsMap.get(animal.id);
                   const draft = draftRounds[animal.id];
                   const mergedRound = draft ? { ...dbRound, ...draft } : dbRound;
 
@@ -362,26 +397,19 @@ function DailyRounds() {
                     >
                       <div className="w-full px-4 py-2 lg:py-2.5 flex flex-col lg:flex-row gap-3 lg:gap-4 lg:items-center">
                         
-                        {/* UNIFIED IDENTITY BLOCK (Scaled to match Dashboard) */}
-                        <div className="flex items-center gap-1.5 lg:gap-3 w-full lg:w-[35%] shrink-0 min-w-0">
-                          <div className="relative shrink-0">
+                        {/* UNIFIED IDENTITY BLOCK (Matched to Daily Logs & Dashboard) */}
+                        <div className="flex items-center gap-3 min-w-0 w-full lg:w-[35%] py-1 shrink-0">
+                          <div className={`w-8 h-8 lg:w-10 lg:h-10 rounded-full flex items-center justify-center shrink-0 border shadow-sm overflow-hidden ${!animal.profile_image_url ? (isGroup ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-50 text-slate-400 border-slate-200') : 'border-slate-200'}`}>
                             {animal.profile_image_url ? (
-                              <img src={animal.profile_image_url} className="w-8 h-8 lg:w-10 lg:h-10 rounded-full object-cover shrink-0 shadow-sm border border-slate-200 mt-0.5" alt="" />
+                              <img src={animal.profile_image_url} alt={animal.name} className="w-full h-full object-cover" />
                             ) : (
-                              <div className={`p-2 lg:p-2.5 rounded-full shrink-0 shadow-sm mt-0.5 ${isGroup ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'bg-slate-50 text-slate-400 border border-slate-200'}`}>
-                                {isGroup ? <Users size={14} className="lg:w-4 lg:h-4" /> : <User size={14} className="lg:w-4 lg:h-4" />}
-                              </div>
-                            )}
-                            {isGroup && (
-                              <div className="absolute -bottom-1 -right-1 w-3 h-3 lg:w-4 lg:h-4 bg-blue-500 rounded-full flex items-center justify-center border-2 border-white shadow-sm">
-                                <Users size={8} className="text-white" />
-                              </div>
+                              isGroup ? <Users size={16} /> : <User size={16} />
                             )}
                           </div>
                           
-                          <div className="flex flex-col min-w-0 flex-1 ml-2 lg:ml-0">
+                          <div className="flex flex-col min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
-                              <span className="font-bold text-slate-900 text-[11px] md:text-[12px] lg:text-[13px] truncate">{animal.name}</span>
+                              <h3 className="font-bold text-slate-900 text-[11px] md:text-[12px] lg:text-[13px] tracking-tight truncate" title={animal.name}>{animal.name}</h3>
                               {hasNote && <AlertCircle size={12} className="text-amber-500 shrink-0 lg:w-3.5 lg:h-3.5" />}
                             </div>
                             <div className="flex items-center gap-1.5 text-[9px] md:text-[10px] lg:text-[11px] text-slate-500 truncate mt-0.5">
@@ -450,38 +478,38 @@ function DailyRounds() {
               </div>
             )}
           </div>
+        </div>
 
-          {/* --- FIXED BOTTOM SUBMIT BAR --- */}
-          <div className="absolute bottom-0 left-0 right-0 border-t border-slate-200 bg-white/95 backdrop-blur p-3 md:p-4 flex items-center justify-between z-20 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-            <div className="flex-1 min-w-0 pr-4">
-               {hasUnsavedChanges ? (
-                 <div className="flex items-center gap-2 text-amber-600">
-                   <AlertCircle size={16} className="shrink-0" />
-                   <span className="text-[10px] md:text-xs font-bold truncate">Unsaved checks detected</span>
-                 </div>
-               ) : submissionStatus ? (
-                 <div className={`flex items-center gap-2 ${submissionStatus.type === 'success' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                   <CheckCircle2 size={16} className="shrink-0" />
-                   <span className="text-[10px] md:text-xs font-bold truncate">{submissionStatus.message}</span>
-                 </div>
-               ) : (
-                 <span className="text-[10px] md:text-xs text-slate-500 truncate block">All checks synced to database.</span>
-               )}
-            </div>
-            
-            <button
-              onClick={handleSubmit}
-              disabled={!hasUnsavedChanges || isSubmitting}
-              className={`px-6 py-2.5 lg:py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm ${
-                hasUnsavedChanges && !isSubmitting
-                  ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:shadow-md active:scale-95'
-                  : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-              }`}
-            >
-              {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-              Submit Rounds
-            </button>
+        {/* --- FIXED BOTTOM SUBMIT BAR --- */}
+        <div className="absolute bottom-0 left-0 right-0 border-t border-slate-200 bg-white/95 backdrop-blur p-3 md:p-4 flex items-center justify-between z-20 shrink-0 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+          <div className="flex-1 min-w-0 pr-4">
+             {hasUnsavedChanges ? (
+               <div className="flex items-center gap-2 text-amber-600">
+                 <AlertCircle size={16} className="shrink-0" />
+                 <span className="text-[10px] md:text-xs font-bold truncate">Unsaved checks detected</span>
+               </div>
+             ) : submissionStatus ? (
+               <div className={`flex items-center gap-2 ${submissionStatus.type === 'success' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                 <CheckCircle2 size={16} className="shrink-0" />
+                 <span className="text-[10px] md:text-xs font-bold truncate">{submissionStatus.message}</span>
+               </div>
+             ) : (
+               <span className="text-[10px] md:text-xs text-slate-500 truncate block">All checks synced to database.</span>
+             )}
           </div>
+          
+          <button
+            onClick={handleSubmit}
+            disabled={!hasUnsavedChanges || isSubmitting}
+            className={`px-6 py-2.5 lg:py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm ${
+              hasUnsavedChanges && !isSubmitting
+                ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:shadow-md active:scale-95'
+                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            }`}
+          >
+            {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+            Submit Rounds
+          </button>
         </div>
       </div>
 
@@ -525,7 +553,7 @@ function DailyRounds() {
                   
                   setDraftRounds(prev => {
                     const existingDraft = prev[animalId];
-                    const dbRound = rounds.find(r => r.animal_id === animalId);
+                    const dbRound = roundsMap.get(animalId); // Fast O(1) Lookup
                     const merged = existingDraft ? { ...dbRound, ...existingDraft } : dbRound;
 
                     return {
@@ -557,3 +585,5 @@ function DailyRounds() {
     </div>
   );
 }
+
+export default DailyRounds;

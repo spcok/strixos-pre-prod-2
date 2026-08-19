@@ -278,7 +278,7 @@ function MissingHusbandryRecords() {
       <div className="flex justify-between items-center w-full portrait:flex landscape:hidden lg:landscape:flex">
         <div className="shrink-0 pr-4">
            <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-             <ShieldAlert className="text-rose-600" /> Compliance Audit
+             Compliance Audit
            </h1>
         </div>
       </div>

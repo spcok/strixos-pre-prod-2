@@ -1,10 +1,12 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute, useNavigate } from '@tanstack/react-router'; 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { 
   Stethoscope, Search, Plus, Activity, 
   ShieldAlert, FileText, ChevronRight, X, Loader2, UserRound, AlertCircle, CalendarClock, Scale, MapPin, Cake, ChevronDown, Trash2, Edit, Pill, AlertTriangle
 } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { toast } from 'sonner';
@@ -49,12 +51,12 @@ function ClinicalRecordsModule() {
   const [isSOAPModalOpen, setIsSOAPModalOpen] = useState(false);
   const [isMARModalOpen, setIsMARModalOpen] = useState(false);
   const [recordToEdit, setRecordToEdit] = useState<any | null>(null);
-  // FIX APPLIED: Changed 'id' to 'recordId' to match the mutation expectation
   const [recordToDelete, setRecordToDelete] = useState<{ recordId: string, weightLogId: string | null } | null>(null);
   const [linkedClinicalIdForMAR, setLinkedClinicalIdForMAR] = useState<string | null>(null);
   
   // Expanded State
   const [expandedRecords, setExpandedRecords] = useState<Record<string, boolean>>({});
+  const scrollParentRef = useRef<HTMLDivElement>(null);
 
   const toggleRecord = (id: string) => {
     setExpandedRecords(prev => ({ ...prev, [id]: !prev[id] }));
@@ -72,11 +74,7 @@ function ClinicalRecordsModule() {
       if (error) throw error;
       return data;
     },
-    // FIX APPLIED: Strict offline failover 
-    staleTime: 0,
-    gcTime: 1209600000,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
+    networkMode: 'always',
   });
 
   const { data: staffMembers = [], isLoading: isStaffLoading } = useQuery({
@@ -90,10 +88,7 @@ function ClinicalRecordsModule() {
       if (error) throw error;
       return data;
     },
-    staleTime: 0,
-    gcTime: 1209600000,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
+    networkMode: 'always',
   });
 
   const { data: records = [], isLoading: isLoadingRecords } = useQuery({
@@ -117,10 +112,7 @@ function ClinicalRecordsModule() {
       }
       return data;
     },
-    staleTime: 0,
-    gcTime: 1209600000,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
+    networkMode: 'always',
   });
 
   const { data: activeMars = [] } = useQuery({
@@ -136,10 +128,7 @@ function ClinicalRecordsModule() {
       if (error && error.code !== 'PGRST116') throw error;
       return data || [];
     },
-    staleTime: 0,
-    gcTime: 1209600000,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
+    networkMode: 'always',
   });
 
   const selectedAnimal = useMemo(() => animals.find(a => a.id === selectedAnimalId), [animals, selectedAnimalId]);
@@ -180,7 +169,6 @@ function ClinicalRecordsModule() {
 
   const handleDeleteTrigger = (e: React.MouseEvent, recordId: string, weightLogId: string | null) => {
     e.stopPropagation(); 
-    // FIX APPLIED: Set recordId explicitly to match the mutation
     setRecordToDelete({ recordId, weightLogId });
   };
 
@@ -202,8 +190,15 @@ function ClinicalRecordsModule() {
     setRecordToEdit(null);
   };
 
+  // Virtualizer for the clinical timeline
+  const rowVirtualizer = useWindowVirtualizer({
+    count: records.length,
+    estimateSize: () => 120,
+    overscan: 5,
+  });
+
   return (
-    <div className="flex h-[calc(100vh-6rem)] bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in duration-300 relative">
+    <div className="flex h-[calc(100vh-6rem)] bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in duration-300 relative w-full">
       
       {/* LEFT PANEL: Patient Roster */}
       <div className="w-1/3 lg:w-1/4 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
@@ -233,7 +228,7 @@ function ClinicalRecordsModule() {
                 onClick={() => setSelectedAnimalId(animal.id)}
                 className={`w-full text-left p-3 rounded-xl flex items-center justify-between transition-all ${
                   selectedAnimalId === animal.id 
-                    ? 'bg-emerald-500 text-white shadow-md' 
+                    ? 'bg-emerald-600 text-white shadow-md' 
                     : 'hover:bg-slate-200 text-slate-700'
                 }`}
               >
@@ -271,7 +266,7 @@ function ClinicalRecordsModule() {
                 {hasPermission('clinical:write') && (
                   <button 
                     onClick={handleOpenNewSOAP}
-                    className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-colors shadow-sm"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-colors shadow-sm"
                   >
                     <Plus size={16} /> New Clinical Entry
                   </button>
@@ -290,7 +285,6 @@ function ClinicalRecordsModule() {
                   <Activity size={14} /> Target: {selectedAnimal.average_target_weight || 'N/A'}g
                 </div>
                 
-                {/* Dynamic MAR Badge - Now clickable! */}
                 {activeMars.length > 0 ? (
                   <button 
                     onClick={() => navigate({ to: '/clinical/medications' })}
@@ -306,8 +300,8 @@ function ClinicalRecordsModule() {
               </div>
             </div>
 
-            {/* 2. The Chronological Collapsible Timeline */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
+            {/* 2. The Chronological Timeline */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-6" ref={scrollParentRef}>
               {isLoadingRecords ? (
                 <div className="flex justify-center py-12"><Loader2 className="animate-spin text-emerald-500" size={32} /></div>
               ) : records.length === 0 ? (
@@ -317,7 +311,8 @@ function ClinicalRecordsModule() {
                 </div>
               ) : (
                 <div className="space-y-4 pl-4 border-l-2 border-slate-200 ml-4">
-                  {records.map((record) => {
+                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const record = records[virtualRow.index];
                     const isExpanded = expandedRecords[record.id];
                     const canEdit = hasPermission('clinical:write') && isEditable(record.created_at);
                     
@@ -336,7 +331,7 @@ function ClinicalRecordsModule() {
 
                     return (
                       <div key={record.id} className="relative pl-6">
-                        <div className="absolute -left-[31px] top-4 w-4 h-4 rounded-full border-4 border-white bg-emerald-500 shadow-sm z-10" />
+                        <div className="absolute -left-[31px] top-4 w-4 h-4 rounded-full border-4 border-white bg-emerald-600 shadow-sm z-10" />
                         
                         <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden transition-all duration-200 ${isExpanded ? 'ring-2 ring-emerald-500/20' : 'hover:border-slate-300 hover:shadow-md'}`}>
                           
@@ -352,7 +347,7 @@ function ClinicalRecordsModule() {
                                   {new Date(record.record_date || record.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}
                                 </span>
                                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-100 px-2 py-1 rounded-md border border-slate-200">
-                                  {record.record_type || 'Exam'}
+                                  {record.record_type || 'Routine Check'}
                                 </span>
                                 {!isEditable(record.created_at) && (
                                   <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1" title="ZLA Compliance Lock Active">
@@ -369,7 +364,7 @@ function ClinicalRecordsModule() {
                               <div className="flex items-center gap-2">
                                 <UserRound size={14} className="text-slate-400" />
                                 <span className={record.conductor_role === 'EXTERNAL_VET' ? 'text-rose-600' : ''}>
-                                  {conductorName}
+                                  {conductorName} ({record.conductor_role || 'Staff'})
                                 </span>
                               </div>
                               <div className="flex items-center gap-2 w-20 justify-end">
@@ -554,8 +549,7 @@ function SOAPFormModal({
 
   const isEditMode = !!existingRecord;
 
-  // INITIAL STATE
-  const [recordType, setRecordType] = useState('Routine Exam');
+  const [recordType, setRecordType] = useState('Routine Check');
   const [title, setTitle] = useState('');
   const [recordDate, setRecordDate] = useState('');
   const [weight, setWeight] = useState('');
@@ -567,6 +561,7 @@ function SOAPFormModal({
   
   const [conductorType, setConductorType] = useState<'INTERNAL' | 'EXTERNAL'>('INTERNAL');
   const [conductedBy, setConductedBy] = useState(profile?.id || '');
+  const [conductorRole, setConductorRole] = useState('Keeper');
   const [externalVetName, setExternalVetName] = useState('');
   const [externalClinic, setExternalClinic] = useState('');
 
@@ -574,7 +569,7 @@ function SOAPFormModal({
 
   useEffect(() => {
     if (existingRecord) {
-      setRecordType(existingRecord.record_type || 'Routine Exam');
+      setRecordType(existingRecord.record_type || 'Routine Check');
       setTitle(existingRecord.title || '');
       setSubjective(existingRecord.soap_subjective || '');
       setObjective(existingRecord.soap_objective || '');
@@ -588,6 +583,7 @@ function SOAPFormModal({
       } else {
         setConductorType('INTERNAL');
         setConductedBy(existingRecord.conducted_by || profile?.id || '');
+        setConductorRole(existingRecord.conductor_role || 'Keeper');
       }
 
       if (existingRecord.record_date) {
@@ -636,9 +632,7 @@ function SOAPFormModal({
       }
 
       const finalConductedBy = conductorType === 'INTERNAL' ? conductedBy : profile.id;
-      const finalConductorRole = conductorType === 'INTERNAL' 
-        ? (staffMembers.find(s => s.id === conductedBy)?.role || profile.role || 'UNKNOWN') 
-        : 'EXTERNAL_VET';
+      const finalConductorRole = conductorType === 'INTERNAL' ? conductorRole : 'EXTERNAL_VET';
 
       const parsedDateObj = new Date(recordDate);
       const parsedRecordDate = parsedDateObj.toISOString();
@@ -775,10 +769,11 @@ function SOAPFormModal({
                       value={recordType} onChange={(e) => setRecordType(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all cursor-pointer"
                     >
-                      <option value="Routine Exam">Routine Exam</option>
-                      <option value="Emergency Triage">Emergency Triage</option>
-                      <option value="Recheck / Follow-up">Recheck / Follow-up</option>
-                      <option value="Surgery / Procedure">Surgery / Procedure</option>
+                      <option value="Routine Check">Routine Check</option>
+                      <option value="Illness">Illness</option>
+                      <option value="Injury">Injury</option>
+                      <option value="Surgery">Surgery</option>
+                      <option value="Follow up">Follow up</option>
                     </select>
                   </div>
 
@@ -845,21 +840,38 @@ function SOAPFormModal({
                   </button>
                 </div>
 
-                <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 space-y-4">
                   {conductorType === 'INTERNAL' ? (
-                    <div>
-                      <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Select Staff Member <span className="text-rose-500">*</span></label>
-                      <select 
-                        value={conductedBy} 
-                        onChange={(e) => setConductedBy(e.target.value)}
-                        disabled={isStaffLoading}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all disabled:opacity-50 cursor-pointer"
-                      >
-                        {staffMembers.map(user => (
-                          <option key={user.id} value={user.id}>{user.name} ({user.role.replace('_', ' ')})</option>
-                        ))}
-                      </select>
-                    </div>
+                    <>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Select Staff Member <span className="text-rose-500">*</span></label>
+                        <select 
+                          value={conductedBy} 
+                          onChange={(e) => setConductedBy(e.target.value)}
+                          disabled={isStaffLoading}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          {staffMembers.map(user => (
+                            <option key={user.id} value={user.id}>{user.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Conductor Role <span className="text-rose-500">*</span></label>
+                        <select 
+                          value={conductorRole} 
+                          onChange={(e) => setConductorRole(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all cursor-pointer"
+                        >
+                          <option value="Volunteer">Volunteer</option>
+                          <option value="Keeper">Keeper</option>
+                          <option value="Senior Keeper">Senior Keeper</option>
+                          <option value="Head Keeper">Head Keeper / Volunteer</option>
+                          <option value="Owner Director">Owner Director</option>
+                        </select>
+                      </div>
+                    </>
                   ) : (
                     <div className="space-y-4">
                       <div>
@@ -893,7 +905,6 @@ function SOAPFormModal({
                 <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-blue-600 mb-2">
                   <div className="w-2 h-2 rounded-full bg-blue-500"></div> S - Subjective (History / Observations) <span className="text-rose-500">*</span>
                 </label>
-                {/* FIX: Changed resize-none to resize-y */}
                 <textarea 
                   value={subjective} onChange={(e) => setSubjective(e.target.value)} placeholder="Keeper reports bird is reluctant to bear weight..."
                   className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-y transition-all placeholder:text-slate-300"
@@ -953,7 +964,7 @@ function SOAPFormModal({
             <button 
               onClick={submitMutation}
               disabled={isSubmitting}
-              className={`${requiresMedication ? 'bg-rose-500 hover:bg-rose-600' : 'bg-emerald-500 hover:bg-emerald-600'} disabled:opacity-50 disabled:cursor-not-allowed text-white px-8 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 shadow-sm hover:shadow active:scale-95`}
+              className={`${requiresMedication ? 'bg-rose-500 hover:bg-rose-600' : 'bg-emerald-600 hover:bg-emerald-500'} disabled:opacity-50 disabled:cursor-not-allowed text-white px-8 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 shadow-sm hover:shadow active:scale-95`}
             >
               {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : requiresMedication ? <ChevronRight size={16} /> : <ShieldAlert size={16} />}
               {isEditMode ? 'Update Record' : requiresMedication ? 'Seal & Prescribe' : 'Seal Clinical Record'}
@@ -965,3 +976,5 @@ function SOAPFormModal({
     </div>
   );
 }
+
+export default ClinicalRecordsModule;

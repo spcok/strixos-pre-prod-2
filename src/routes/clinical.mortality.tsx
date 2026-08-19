@@ -94,7 +94,6 @@ export function MortalityLedger() {
       <div className="bg-white p-4 md:p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 bg-slate-100 text-slate-700 rounded-xl flex items-center justify-center shrink-0 border border-slate-200 shadow-inner">
-            <Skull size={24} />
           </div>
           <div>
             <h1 className="text-lg md:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
