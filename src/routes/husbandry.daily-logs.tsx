@@ -1,7 +1,8 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useReactTable, getCoreRowModel, flexRender, ColumnDef, getSortedRowModel, getFilteredRowModel, SortingState } from '@tanstack/react-table';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Scale, ChevronLeft, ChevronRight, Loader2, Search, Apple, CheckCircle2, Users, User, ArrowUpDown, ThermometerSun, Plus, Calendar, Droplets } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Animal } from '../types';
@@ -9,7 +10,7 @@ import { Animal } from '../types';
 import { FeedModal } from '../components/husbandry/FeedModal';
 import { WeightModal } from '../components/husbandry/WeightModal';
 import { TemperatureModal } from '../components/husbandry/TemperatureModal';
-import DailyLogFormModal from '../components/animals/DailyLogFormModal'; // Added for Misting
+import DailyLogFormModal from '../components/animals/DailyLogFormModal'; 
 
 export const Route = createFileRoute('/husbandry/daily-logs')({
   component: HusbandryLogs,
@@ -28,13 +29,6 @@ function useIsMobile() {
 
 const getLocalDateString = (d = new Date()) => {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-};
-
-const formatReadableDate = (dateString: string) => {
-  const parts = dateString.split('-');
-  if (parts.length !== 3) return dateString;
-  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
 const isValidDateString = (dateString: string) => {
@@ -95,9 +89,7 @@ const FeedCell = ({ animal, logs, onOpenModal }: { animal: any, logs: any[], onO
         
         const qty = log.quantity_offered ?? log.amount_offered ?? log.amount ?? log.quantity ?? '';
         const rawUnit = log.quantity_unit ?? log.unit ?? '';
-        
         const unit = rawUnit.toLowerCase().includes('whole') ? 'x' : rawUnit;
-        
         const food = log.food_item ?? log.food_type ?? log.feed_details ?? log.food ?? 'Feed';
 
         let qtyStr = qty ? `${qty}${unit} ${food}` : food;
@@ -187,7 +179,6 @@ const TempCell = ({ animal, log, onOpenModal }: { animal: any, log: any, onOpenM
   );
 };
 
-// --- NEW ISOLATED MISTING CELL ---
 const MistCell = ({ animal, log, activeDate, onOpenModal }: { animal: any, log: any, activeDate: string, onOpenModal: (data: any) => void }) => {
   if (log) {
     const level = log.mist_level ? log.mist_level.charAt(0).toUpperCase() + log.mist_level.slice(1).toLowerCase() : 'Logged';
@@ -215,11 +206,15 @@ const MistCell = ({ animal, log, activeDate, onOpenModal }: { animal: any, log: 
     </button>
   );
 };
+
+// ============================================================================
+// MAIN COMPONENT
 // ============================================================================
 
 function HusbandryLogs() {
   const isMobile = useIsMobile();
   const queryClient = useQueryClient();
+  const parentRef = useRef<HTMLDivElement>(null);
   
   const [activeDate, setActiveDate] = useState<string>(getLocalDateString());
   const [inputDate, setInputDate] = useState<string>(getLocalDateString());
@@ -233,6 +228,7 @@ function HusbandryLogs() {
   const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null; initialData?: any }>({ isOpen: false, animal: null, initialData: undefined });
   const [mistModalState, setMistModalState] = useState<{ isOpen: boolean; animal: Animal | null; initialData?: any }>({ isOpen: false, animal: null, initialData: undefined });
 
+  // 1. OFFLINE-FIRST QUERIES WITH 14-DAY RETENTION
   const { data: animals = [], isLoading: loadingAnimals } = useQuery({
     queryKey: ['animals', 'husbandry'],
     queryFn: async () => {
@@ -240,11 +236,15 @@ function HusbandryLogs() {
       if (error) throw error;
       return data as Animal[];
     },
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60 * 24 * 14,
+    networkMode: 'offlineFirst',
     meta: { persist: true }
   });
 
+  // HOTFIX: Query keys aligned exactly to Modal invalidation signatures
   const { data: feedLogs = [], isLoading: loadingFeeds } = useQuery({
-    queryKey: ['feed_logs', activeDate],
+    queryKey: ['feeds', activeDate],
     queryFn: async () => {
       const start = getSafeISOStart(activeDate);
       const end = getSafeISOEnd(activeDate);
@@ -253,11 +253,14 @@ function HusbandryLogs() {
       return data;
     },
     placeholderData: keepPreviousData,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60 * 24 * 14,
+    networkMode: 'offlineFirst',
     meta: { persist: true }
   });
 
   const { data: weightLogs = [], isLoading: loadingWeights } = useQuery({
-    queryKey: ['weight_logs', activeDate],
+    queryKey: ['weights', activeDate],
     queryFn: async () => {
       const start = getSafeISOStart(activeDate);
       const end = getSafeISOEnd(activeDate);
@@ -266,11 +269,14 @@ function HusbandryLogs() {
       return data;
     },
     placeholderData: keepPreviousData,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60 * 24 * 14,
+    networkMode: 'offlineFirst',
     meta: { persist: true }
   });
 
   const { data: tempLogs = [], isLoading: loadingTemps } = useQuery({
-    queryKey: ['temperature_logs', activeDate],
+    queryKey: ['temperatures', activeDate],
     queryFn: async () => {
       const start = getSafeISOStart(activeDate);
       const end = getSafeISOEnd(activeDate);
@@ -279,6 +285,9 @@ function HusbandryLogs() {
       return data;
     },
     placeholderData: keepPreviousData,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60 * 24 * 14,
+    networkMode: 'offlineFirst',
     meta: { persist: true }
   });
 
@@ -292,21 +301,26 @@ function HusbandryLogs() {
       return data;
     },
     placeholderData: keepPreviousData,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 60 * 24 * 14,
+    networkMode: 'offlineFirst',
     meta: { persist: true }
   });
 
   const isLoading = loadingAnimals || loadingFeeds || loadingWeights || loadingTemps || loadingMists;
 
+  // 2. REALTIME CACHE INVALIDATION
   useEffect(() => {
     const channel = supabase.channel('daily-logs-sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'feed_logs' }, () => queryClient.invalidateQueries({ queryKey: ['feed_logs'] }))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'weight_logs' }, () => queryClient.invalidateQueries({ queryKey: ['weight_logs'] }))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'temperature_logs' }, () => queryClient.invalidateQueries({ queryKey: ['temperature_logs'] }))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'feed_logs' }, () => queryClient.invalidateQueries({ queryKey: ['feeds'] }))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weight_logs' }, () => queryClient.invalidateQueries({ queryKey: ['weights'] }))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'temperature_logs' }, () => queryClient.invalidateQueries({ queryKey: ['temperatures'] }))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'mist_logs' }, () => queryClient.invalidateQueries({ queryKey: ['mist_logs'] }))
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
+  // 3. DATE HANDLERS
   const updateDate = (newDate: string) => {
     if (isValidDateString(newDate)) {
       setActiveDate(newDate);
@@ -320,7 +334,7 @@ function HusbandryLogs() {
     const parts = activeDate.split('-');
     if (parts.length !== 3) return;
     const [y, m, d] = parts.map(Number);
-    const dateObj = new Date(y, m - 1, d);
+    const dateObj = new Date(y, m - 1, d, 12, 0, 0); // Noon anchor prevents DST bugs
     dateObj.setDate(dateObj.getDate() + days);
     
     const newDateString = getLocalDateString(dateObj);
@@ -331,6 +345,7 @@ function HusbandryLogs() {
     updateDate(getLocalDateString());
   };
 
+  // 4. O(1) PERFORMANCE ENGINE
   const getFeedLogsForAnimal = (animalId: string) => {
     return feedLogs.filter(log => log.animal_id === animalId);
   };
@@ -387,6 +402,7 @@ function HusbandryLogs() {
   const categories = useMemo(() => Array.from(new Set(animals.map(a => a.category).filter(Boolean))).sort(), [animals]);
   const tabs = ['ALL', ...categories];
 
+  // 5. TANSTACK TABLE SETUP
   const columns = useMemo<ColumnDef<any>[]>(() => [
     {
       accessorKey: 'name',
@@ -456,6 +472,20 @@ function HusbandryLogs() {
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
   });
+
+  const { rows } = table.getRowModel();
+
+  // 6. VIRTUALIZER SETUP (MOBILE OPTIMIZED)
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => isMobile ? 180 : 80, // Expands row height for mobile stacked layout
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   const visibleColsCount = table.getVisibleLeafColumns().length;
   const tableGridCols = visibleColsCount === 5 
@@ -536,7 +566,10 @@ function HusbandryLogs() {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar bg-slate-50/30">
+        {/* VIRTUALIZED SCROLL CONTAINER */}
+        <div ref={parentRef} className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar bg-slate-50/30">
+          
+          {/* DESKTOP HEADER */}
           <div className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-20 backdrop-blur-md" style={{ gridTemplateColumns: tableGridCols }}>
             {table.getHeaderGroups().map(headerGroup => (
               <React.Fragment key={headerGroup.id}>
@@ -557,7 +590,7 @@ function HusbandryLogs() {
           </div>
 
           <div className="p-3 lg:p-0">
-            {table.getRowModel().rows.length === 0 && !isLoading ? (
+            {rows.length === 0 && !isLoading ? (
               <div className="p-8 lg:p-12 text-center text-slate-500 flex flex-col items-center">
                 <div className="w-12 h-12 lg:w-16 lg:h-16 bg-white rounded-xl lg:rounded-2xl flex items-center justify-center mb-4 border border-slate-200 shadow-sm">
                   <Search size={24} className="text-slate-400" />
@@ -566,30 +599,44 @@ function HusbandryLogs() {
                 <p className="text-[10px] lg:text-xs font-medium">Try adjusting your search or category filters.</p>
               </div>
             ) : (
-              <div className="space-y-3 lg:space-y-0 lg:divide-y lg:divide-slate-100">
-                {table.getRowModel().rows.map(row => (
-                  <div 
-                    key={row.id} 
-                    className="grid grid-cols-1 lg:grid border border-slate-200 lg:border-none rounded-xl lg:rounded-none bg-white p-3 lg:p-0 hover:bg-slate-50 transition-colors shadow-sm lg:shadow-none gap-2 lg:gap-0"
-                    style={{ gridTemplateColumns: isMobile ? '1fr' : tableGridCols }}
-                  >
-                    {row.getVisibleCells().map((cell, index) => (
-                      <div 
-                        key={cell.id} 
-                        className={`w-full lg:px-5 lg:py-3 flex min-w-0 ${isMobile ? 'flex-col' : 'items-center justify-center'}`}
-                      >
-                        {isMobile && index !== 0 && (
-                          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1 text-center w-full">
-                            {flexRender(cell.column.columnDef.header, cell.getContext())}
+              <div
+                style={{
+                  height: `${rowVirtualizer.getTotalSize()}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualItems.map(virtualRow => {
+                  const row = rows[virtualRow.index];
+                  return (
+                    <div 
+                      key={row.id}
+                      data-index={virtualRow.index}
+                      ref={rowVirtualizer.measureElement}
+                      className="absolute top-0 left-0 w-full grid grid-cols-1 lg:grid border border-slate-200 lg:border-none lg:border-b border-b-slate-100 rounded-xl lg:rounded-none bg-white p-3 lg:p-0 hover:bg-slate-50 transition-colors shadow-sm lg:shadow-none gap-2 lg:gap-0 box-border"
+                      style={{ 
+                        gridTemplateColumns: isMobile ? '1fr' : tableGridCols,
+                        transform: `translateY(${virtualRow.start}px)`
+                      }}
+                    >
+                      {row.getVisibleCells().map((cell, index) => (
+                        <div 
+                          key={cell.id} 
+                          className={`w-full lg:px-5 lg:py-3 flex min-w-0 ${isMobile ? 'flex-col' : 'items-center justify-center'}`}
+                        >
+                          {isMobile && index !== 0 && (
+                            <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1 text-center w-full">
+                              {flexRender(cell.column.columnDef.header, cell.getContext())}
+                            </div>
+                          )}
+                          <div className={`w-full ${index !== 0 && !isMobile ? 'flex justify-center' : ''}`}>
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
                           </div>
-                        )}
-                        <div className={`w-full ${index !== 0 && !isMobile ? 'flex justify-center' : ''}`}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                ))}
+                      ))}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

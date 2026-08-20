@@ -204,7 +204,7 @@ function ClinicalRecordsModule() {
       <div className="w-1/3 lg:w-1/4 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
         <div className="p-4 border-b border-slate-200 bg-white">
           <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2 mb-3">
-            <Stethoscope className="text-emerald-600" size={18} /> Patient Roster
+           Patient Roster
           </h2>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />

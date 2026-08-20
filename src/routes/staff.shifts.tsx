@@ -1,61 +1,105 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '../lib/supabase';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { 
+  Plus, X, Search, Loader2, Trash2, Calendar, Clock, 
+  MapPin, UserCircle, Users, User, AlertTriangle, Sparkles 
+} from 'lucide-react';
+import { format, parseISO } from 'date-fns';
 import { toast } from 'sonner';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../lib/auth';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const shiftsQueryOptions = queryOptions({
+  queryKey: ['shifts_data'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('shifts')
+      .select('*, users:user_id(id, name, role)')
+      .order('start_time', { ascending: true });
+    
+    if (error) throw new Error(error.message);
+    return data || [];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 14,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const staffListQueryOptions = queryOptions({
+  queryKey: ['staff_list'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, name, role, is_deleted, is_active')
+      .order('name');
+    
+    if (error) throw new Error(error.message);
+    return data || [];
+  },
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 14,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/staff/shifts')({
+  loader: async ({ context: { queryClient } }) => {
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(shiftsQueryOptions),
+        queryClient.ensureQueryData(staffListQueryOptions)
+      ]);
+    }
+  },
   component: ShiftsModule,
 });
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  React.useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 1024);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+  return isMobile;
+}
+
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function ShiftsModule() {
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const isMobile = useIsMobile();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+  
   const [viewMode, setViewMode] = useState<'INDIVIDUAL' | 'GROUPED'>('INDIVIDUAL');
   const [isGeneratorOpen, setIsGeneratorOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   
-  // In-app confirmation states to bypass iframe dialog blocking
+  // In-app confirmation states
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmWipeId, setConfirmWipeId] = useState<string | null>(null);
   const [confirmGlobalWipe, setConfirmGlobalWipe] = useState(false);
 
-  // ------------------------------------------------------------------
-  // 1. DATA FETCHING (Online-First with 14-Day Offline Failover)
-  // ------------------------------------------------------------------
-  const { data: shifts = [], isLoading: loadingShifts } = useQuery({
-    queryKey: ['shifts_data'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('shifts')
-        .select('*, users:user_id(id, name, role)')
-        .order('start_time', { ascending: true });
-      
-      if (error) throw new Error(error.message);
-      return data;
-    },
-    staleTime: 1000 * 60 * 5,
-    gcTime: 1000 * 60 * 60 * 24 * 14,
-    networkMode: 'offlineFirst'
-  });
+  // 1. Data Fetching
+  const { data: shifts = [], isLoading: loadingShifts } = useQuery(shiftsQueryOptions);
+  const { data: staffMembers = [], isLoading: loadingStaff } = useQuery(staffListQueryOptions);
 
-  const { data: staffMembers = [] } = useQuery({
-    queryKey: ['staff_list'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, name, role')
-        .order('name');
-      
-      if (error) throw new Error(error.message);
-      return data;
-    },
-    staleTime: 1000 * 60 * 60,
-    gcTime: 1000 * 60 * 60 * 24 * 14,
-    networkMode: 'offlineFirst'
-  });
+  const isLoading = loadingShifts || loadingStaff;
 
-  // ------------------------------------------------------------------
-  // 2. HARD DELETION MUTATIONS (With Exact Count Tracing)
-  // ------------------------------------------------------------------
+  // 2. Mutations
   const deleteIndividualShift = useMutation({
     mutationFn: async (shiftId: string) => {
       const { error, count } = await supabase
@@ -64,13 +108,14 @@ export function ShiftsModule() {
         .eq('id', shiftId);
 
       if (error) throw new Error(error.message);
-      if (count === 0) throw new Error("0 rows deleted. The record may not exist, or an RLS policy is blocking the DELETE command.");
+      if (count === 0) throw new Error("0 rows deleted. Record not found or action blocked.");
       return true;
     },
     onSuccess: () => {
       toast.success('Shift permanently deleted.');
       setConfirmDeleteId(null);
       queryClient.invalidateQueries({ queryKey: ['shifts_data'] });
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
     },
     onError: (err: Error) => {
       toast.error(`Delete Failed: ${err.message}`);
@@ -88,13 +133,14 @@ export function ShiftsModule() {
         .gt('start_time', rightNow);
 
       if (error) throw new Error(error.message);
-      if (count === 0) throw new Error("0 shifts were deleted. Either no future shifts exist for this user, or RLS blocked the bulk command.");
+      if (count === 0) throw new Error("No upcoming shifts found for this user.");
       return count;
     },
     onSuccess: (count) => {
-      toast.success(`${count} future shifts permanently destroyed.`);
+      toast.success(`${count} upcoming shifts deleted.`);
       setConfirmWipeId(null);
       queryClient.invalidateQueries({ queryKey: ['shifts_data'] });
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
     },
     onError: (err: Error) => {
       toast.error(`Bulk Delete Failed: ${err.message}`);
@@ -111,13 +157,14 @@ export function ShiftsModule() {
         .gt('start_time', rightNow);
         
       if (error) throw new Error(error.message);
-      if (count === 0) throw new Error("0 shifts deleted. RLS policy block.");
+      if (count === 0) throw new Error("No upcoming shifts found.");
       return count;
     },
     onSuccess: (count) => {
-      toast.success(`Global Wipe Complete: ${count} shifts destroyed.`);
+      toast.success(`Global Purge Complete: ${count} upcoming shifts deleted.`);
       setConfirmGlobalWipe(false);
       queryClient.invalidateQueries({ queryKey: ['shifts_data'] });
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
     },
     onError: (err: Error) => {
       toast.error(`Global Wipe Failed: ${err.message}`);
@@ -125,213 +172,371 @@ export function ShiftsModule() {
     }
   });
 
-  // ------------------------------------------------------------------
-  // 3. UI COMPUTATIONS
-  // ------------------------------------------------------------------
+  // 3. Filtered Data
+  const filteredShifts = useMemo(() => {
+    if (!searchQuery.trim()) return shifts;
+    const q = searchQuery.toLowerCase();
+    return shifts.filter((shift: any) => 
+      (shift.users?.name || '').toLowerCase().includes(q) ||
+      (shift.users?.role || '').toLowerCase().includes(q) ||
+      (shift.assigned_area || '').toLowerCase().includes(q) ||
+      (shift.notes || '').toLowerCase().includes(q)
+    );
+  }, [shifts, searchQuery]);
+
   const groupedByKeeper = useMemo(() => {
     const map = new Map<string, { user: any, shifts: any[] }>();
-    shifts.forEach(shift => {
+    filteredShifts.forEach(shift => {
       const uid = shift.user_id;
       if (!map.has(uid)) map.set(uid, { user: shift.users, shifts: [] });
       map.get(uid)?.shifts.push(shift);
     });
     return Array.from(map.values()).sort((a, b) => (a.user?.name || '').localeCompare(b.user?.name || ''));
-  }, [shifts]);
+  }, [filteredShifts]);
+
+  // 4. Virtualizer
+  const rowVirtualizer = useVirtualizer({
+    count: filteredShifts.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => isMobile ? 180 : 80,
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const tableGridCols = "minmax(200px, 1.4fr) minmax(220px, 1.6fr) minmax(180px, 1.2fr) minmax(240px, 1.8fr) minmax(110px, 0.8fr)";
 
   return (
-    <div className="p-6 max-w-7xl mx-auto font-sans bg-gray-50 min-h-screen">
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-5 lg:space-y-6 animate-in fade-in duration-500 w-full">
       
-      {/* HEADER */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Shift Matrix</h1>
-          <p className="text-sm text-gray-500 mt-1">StrixOS Scheduling & Deployment</p>
+      {/* --- BLOCK A: HEADER RIBBON --- */}
+      <div className="flex justify-between items-start w-full mb-2 lg:mb-4 portrait:flex landscape:hidden lg:landscape:flex shrink-0">
+        <div className="shrink-0 pr-4 flex flex-col gap-1.5 lg:gap-2">
+           <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-none">
+             Shift Matrix
+           </h1>
+           <p className="text-[10px] lg:text-xs text-slate-500 font-bold uppercase tracking-widest">
+             Scheduling, Deployment & Shift Generation
+           </p>
         </div>
-        <div className="flex gap-3 w-full md:w-auto">
-          <button 
-            onClick={() => {
-              if (confirmGlobalWipe) {
-                wipeGlobalFutureMutation.mutate();
-              } else {
-                setConfirmGlobalWipe(true);
-                setTimeout(() => setConfirmGlobalWipe(false), 4000);
-              }
-            }}
-            disabled={wipeGlobalFutureMutation.isPending}
-            className="px-5 py-2 bg-red-100 hover:bg-red-200 text-red-700 text-sm font-bold rounded-lg transition-colors disabled:opacity-50"
-          >
-            {wipeGlobalFutureMutation.isPending 
-              ? 'Purging...' 
-              : confirmGlobalWipe 
-                ? 'Click again to confirm Global Purge' 
-                : 'Global Purge'}
-          </button>
-          <select 
-            className="px-4 py-2 bg-gray-100 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 outline-none"
-            value={viewMode} 
-            onChange={(e) => setViewMode(e.target.value as 'INDIVIDUAL' | 'GROUPED')}
-          >
-            <option value="INDIVIDUAL">Individual Ledger</option>
-            <option value="GROUPED">Grouped by Keeper</option>
-          </select>
-          <button 
-            onClick={() => setIsGeneratorOpen(true)}
-            className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-lg transition-colors"
-          >
-            + Generate Pattern
-          </button>
+        
+        {hasPermission('staff:manage') && (
+          <div className="flex items-center gap-2 shrink-0">
+            <button 
+              onClick={() => {
+                if (confirmGlobalWipe) {
+                  wipeGlobalFutureMutation.mutate();
+                } else {
+                  setConfirmGlobalWipe(true);
+                  setTimeout(() => setConfirmGlobalWipe(false), 4000);
+                }
+              }}
+              disabled={wipeGlobalFutureMutation.isPending}
+              className="flex items-center justify-center gap-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-3 lg:px-4 py-2 lg:py-2.5 rounded-xl text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95 disabled:opacity-50"
+            >
+              {wipeGlobalFutureMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              <span>{confirmGlobalWipe ? 'Confirm Global Purge' : 'Global Purge'}</span>
+            </button>
+
+            <button 
+              onClick={() => setIsGeneratorOpen(true)}
+              className="flex items-center justify-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white px-3 lg:px-4 py-2 lg:py-2.5 rounded-xl text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95"
+            >
+              <Sparkles size={14} className="text-indigo-400" />
+              <span>Generate Pattern</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* --- BLOCK B: CONTROL DECK --- */}
+      <div className="flex flex-col sm:flex-row flex-wrap gap-2 lg:gap-3 w-full bg-slate-50/80 p-2 lg:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden lg:landscape:flex shrink-0">
+        <div className="relative flex-1 min-w-[200px] lg:w-96 shrink-0">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+          <input 
+            type="text" 
+            placeholder="Search by keeper name, role, area, or notes..." 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs lg:text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm placeholder:text-slate-400 font-medium"
+          />
         </div>
       </div>
 
-      {/* VIEW: INDIVIDUAL */}
-      {viewMode === 'INDIVIDUAL' && (
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-          {loadingShifts ? (
-            <div className="p-10 text-center text-gray-500">Syncing database...</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-gray-100 text-gray-600 border-b border-gray-200">
-                  <tr>
-                    <th className="p-4 font-semibold">Date</th>
-                    <th className="p-4 font-semibold">Time</th>
-                    <th className="p-4 font-semibold">Keeper</th>
-                    <th className="p-4 font-semibold">Assignment / Notes</th>
-                    <th className="p-4 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {shifts.map((shift) => {
+      {/* --- BLOCK C: VIEW TABS (Pill Design) --- */}
+      <div className="flex gap-1.5 w-full shrink-0 overflow-x-auto pb-1 lg:pb-0">
+        <button
+          onClick={() => setViewMode('INDIVIDUAL')}
+          className={`px-3 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest transition-all shadow-sm flex items-center justify-center gap-1.5 ${
+            viewMode === 'INDIVIDUAL'
+              ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+              : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
+          }`}
+        >
+          Individual Ledger
+        </button>
+        <button
+          onClick={() => setViewMode('GROUPED')}
+          className={`px-3 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest transition-all shadow-sm flex items-center justify-center gap-1.5 ${
+            viewMode === 'GROUPED'
+              ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+              : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
+          }`}
+        >
+          Grouped by Keeper
+        </button>
+      </div>
+
+      {/* --- BLOCK D: MAIN DATA DISPLAY --- */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative mt-1">
+        {isLoading && (
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-10 flex items-center justify-center rounded-2xl">
+            <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center gap-3 border border-slate-100">
+              <Loader2 className="animate-spin text-indigo-600" size={24} />
+              <span className="text-sm font-bold text-slate-700">Syncing Shift Matrix...</span>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'INDIVIDUAL' ? (
+          <div ref={scrollParentRef} className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar bg-slate-50/30">
+            
+            {/* Desktop Table Header */}
+            <div className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-20 backdrop-blur-md" style={{ gridTemplateColumns: tableGridCols }}>
+              <div className="px-5 py-4 flex items-center justify-start text-left">Date & Time</div>
+              <div className="px-5 py-4 flex items-center justify-start text-left">Keeper</div>
+              <div className="px-5 py-4 flex items-center justify-start text-left">Assignment</div>
+              <div className="px-5 py-4 flex items-center justify-start text-left">Notes</div>
+              <div className="px-5 py-4 flex items-center justify-end text-right">Actions</div>
+            </div>
+
+            <div className="p-3 lg:p-0">
+              {filteredShifts.length === 0 && !isLoading ? (
+                <div className="p-8 lg:p-12 text-center text-slate-500 flex flex-col items-center">
+                  <div className="w-12 h-12 lg:w-16 lg:h-16 bg-white rounded-xl lg:rounded-2xl flex items-center justify-center mb-4 border border-slate-200 shadow-sm">
+                    <Calendar size={24} className="text-slate-400" />
+                  </div>
+                  <p className="font-black text-slate-700 mb-1 text-sm tracking-tight">No shifts scheduled</p>
+                  <p className="text-[10px] lg:text-xs font-medium">Use "Generate Pattern" or the Rota to schedule staff.</p>
+                </div>
+              ) : (
+                <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+                  {virtualItems.map((virtualRow) => {
+                    const shift = filteredShifts[virtualRow.index];
                     const startObj = new Date(shift.start_time);
                     const endObj = new Date(shift.end_time);
+
                     return (
-                      <tr key={shift.id} className="hover:bg-gray-50">
-                        <td className="p-4 font-medium text-gray-900">{startObj.toLocaleDateString()}</td>
-                        <td className="p-4 text-gray-600">{startObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {endObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</td>
-                        <td className="p-4">
-                          <p className="font-semibold text-gray-900">{shift.users?.name || 'Unknown'}</p>
-                          <p className="text-xs text-gray-500">{shift.users?.role || 'Staff'}</p>
-                        </td>
-                        <td className="p-4">
-                          <span className="font-semibold text-gray-800">{shift.assigned_area || 'General Duties'}</span>
-                          {shift.notes && <p className="text-xs text-gray-500 mt-1">{shift.notes}</p>}
-                        </td>
-                        <td className="p-4 text-right">
-                          <button 
-                            onClick={() => {
-                              if (confirmDeleteId === shift.id) {
-                                deleteIndividualShift.mutate(shift.id);
-                              } else {
-                                setConfirmDeleteId(shift.id);
-                                setTimeout(() => setConfirmDeleteId(null), 3000);
-                              }
-                            }}
-                            disabled={deleteIndividualShift.isPending}
-                            className={`${confirmDeleteId === shift.id ? 'text-red-800 font-bold' : 'text-red-500 hover:text-red-700 font-medium'} disabled:opacity-50`}
-                          >
-                            {deleteIndividualShift.isPending && deleteIndividualShift.variables === shift.id 
-                              ? 'Deleting...' 
-                              : confirmDeleteId === shift.id 
-                                ? 'Confirm Delete' 
-                                : 'Delete'}
-                          </button>
-                        </td>
-                      </tr>
+                      <div 
+                        key={shift.id} 
+                        className="absolute top-0 left-0 w-full grid grid-cols-1 lg:grid border border-slate-200 lg:border-none lg:border-b border-b-slate-100 rounded-xl lg:rounded-none bg-white p-3.5 lg:p-0 hover:bg-slate-50 transition-colors shadow-sm lg:shadow-none gap-3 lg:gap-0 box-border"
+                        style={{ 
+                          gridTemplateColumns: isMobile ? '1fr' : tableGridCols,
+                          transform: `translateY(${virtualRow.start}px)`
+                        }}
+                      >
+                        {/* 1. Date & Time */}
+                        <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                          {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Date & Time</div>}
+                          <div className="space-y-1 w-full">
+                            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                              <Calendar size={12} className="text-slate-400 shrink-0" />
+                              {format(startObj, 'dd MMM yyyy')}
+                            </span>
+                            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1">
+                              <Clock size={11} className="text-indigo-500 shrink-0" />
+                              {format(startObj, 'HH:mm')} – {format(endObj, 'HH:mm')}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* 2. Keeper Identity */}
+                        <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-2 lg:gap-0">
+                          {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Keeper</div>}
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 shrink-0">
+                              <UserCircle size={18} />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-xs lg:text-sm font-bold text-slate-900 truncate" title={shift.users?.name || 'Unknown'}>
+                                {shift.users?.name || 'Unknown'}
+                              </p>
+                              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest truncate">
+                                {shift.users?.role ? shift.users.role.replace(/_/g, ' ') : 'Staff'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* 3. Assignment */}
+                        <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                          {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Assignment</div>}
+                          <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 w-fit max-w-full">
+                            <MapPin size={12} className="text-slate-400 shrink-0" />
+                            <span className="text-xs font-bold text-slate-700 truncate" title={shift.assigned_area || 'General Duties'}>
+                              {shift.assigned_area || 'General Duties'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* 4. Notes */}
+                        <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                          {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1 pt-2 border-t border-slate-100">Notes</div>}
+                          <p className="text-xs font-medium text-slate-600 line-clamp-1 leading-relaxed" title={shift.notes || 'None'}>
+                            {shift.notes || <span className="text-slate-400 text-[10px] uppercase font-bold tracking-widest">No notes</span>}
+                          </p>
+                        </div>
+
+                        {/* 5. Actions */}
+                        <div className={`w-full lg:px-5 lg:py-3.5 flex min-w-0 ${isMobile ? 'justify-end pt-2 border-t border-slate-100 mt-1' : 'items-center justify-end'}`}>
+                          {hasPermission('staff:manage') && (
+                            <button 
+                              onClick={() => {
+                                if (confirmDeleteId === shift.id) {
+                                  deleteIndividualShift.mutate(shift.id);
+                                } else {
+                                  setConfirmDeleteId(shift.id);
+                                  setTimeout(() => setConfirmDeleteId(null), 3000);
+                                }
+                              }}
+                              disabled={deleteIndividualShift.isPending}
+                              className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all border shadow-sm ${
+                                confirmDeleteId === shift.id 
+                                  ? 'bg-rose-600 text-white border-rose-700 animate-pulse' 
+                                  : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                              } disabled:opacity-50 flex items-center gap-1.5`}
+                            >
+                              {deleteIndividualShift.isPending && deleteIndividualShift.variables === shift.id ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Trash2 size={12} />
+                              )}
+                              <span>{confirmDeleteId === shift.id ? 'Confirm Delete' : 'Delete'}</span>
+                            </button>
+                          )}
+                        </div>
+
+                      </div>
                     );
                   })}
-                </tbody>
-              </table>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
-
-      {/* VIEW: GROUPED */}
-      {viewMode === 'GROUPED' && (
-        <div className="space-y-6">
-          {loadingShifts ? (
-            <div className="p-10 text-center text-gray-500 bg-white rounded-xl border border-gray-200">Syncing database...</div>
-          ) : (
-            groupedByKeeper.map(({ user, shifts: staffShifts }) => (
-              <div key={user?.id || 'unknown'} className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-                <div className="bg-gray-50 p-4 border-b border-gray-200 flex justify-between items-center">
-                  <div>
-                    <h3 className="font-bold text-lg text-gray-900">{user?.name || 'Unknown Keeper'}</h3>
-                    <p className="text-sm text-gray-500">{staffShifts.length} scheduled shifts</p>
-                  </div>
-                  <button 
-                    onClick={() => {
-                      if (confirmWipeId === user.id) {
-                        wipeFutureShifts.mutate(user.id);
-                      } else {
-                        setConfirmWipeId(user.id);
-                        setTimeout(() => setConfirmWipeId(null), 3000);
-                      }
-                    }}
-                    disabled={wipeFutureShifts.isPending}
-                    className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 text-sm font-bold rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    {wipeFutureShifts.isPending && wipeFutureShifts.variables === user.id 
-                      ? 'Wiping...' 
-                      : confirmWipeId === user.id 
-                        ? 'Click again to Confirm Wipe' 
-                        : 'Wipe Future Shifts'}
-                  </button>
-                </div>
-                <div className="overflow-x-auto max-h-96">
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-white sticky top-0 border-b border-gray-200 shadow-sm">
-                      <tr>
-                        <th className="p-3 font-semibold text-gray-600">Date</th>
-                        <th className="p-3 font-semibold text-gray-600">Time</th>
-                        <th className="p-3 font-semibold text-gray-600">Assignment</th>
-                        <th className="p-3 font-semibold text-gray-600 text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {staffShifts.map((shift) => {
-                        const startObj = new Date(shift.start_time);
-                        const endObj = new Date(shift.end_time);
-                        return (
-                          <tr key={shift.id} className="hover:bg-gray-50">
-                            <td className="p-3 font-medium text-gray-900">{startObj.toLocaleDateString()}</td>
-                            <td className="p-3 text-gray-600">{startObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {endObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</td>
-                            <td className="p-3">
-                              <span className="font-semibold text-gray-800">{shift.assigned_area || 'General Duties'}</span>
-                            </td>
-                            <td className="p-3 text-right">
-                              <button 
-                                onClick={() => {
-                                  if (confirmDeleteId === shift.id) {
-                                    deleteIndividualShift.mutate(shift.id);
-                                  } else {
-                                    setConfirmDeleteId(shift.id);
-                                    setTimeout(() => setConfirmDeleteId(null), 3000);
-                                  }
-                                }}
-                                disabled={deleteIndividualShift.isPending}
-                                className={`${confirmDeleteId === shift.id ? 'text-red-800 font-bold' : 'text-red-500 hover:text-red-700 font-medium'} disabled:opacity-50`}
-                              >
-                                {deleteIndividualShift.isPending && deleteIndividualShift.variables === shift.id 
-                                  ? 'Deleting...' 
-                                  : confirmDeleteId === shift.id 
-                                    ? 'Confirm' 
-                                    : 'Delete'}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+          </div>
+        ) : (
+          /* GROUPED VIEW */
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 space-y-4 bg-slate-50/30">
+            {groupedByKeeper.length === 0 && !isLoading ? (
+              <div className="p-8 text-center text-slate-500 flex flex-col items-center">
+                <Users size={32} className="text-slate-400 mb-2" />
+                <p className="font-bold text-sm text-slate-700">No scheduled shifts grouped by keeper.</p>
               </div>
-            ))
-          )}
-        </div>
-      )}
+            ) : (
+              groupedByKeeper.map(({ user, shifts: staffShifts }) => (
+                <div key={user?.id || 'unknown'} className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+                  <div className="bg-slate-50 p-4 border-b border-slate-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                    <div>
+                      <h3 className="font-black text-sm lg:text-base text-slate-900 uppercase tracking-tight flex items-center gap-2">
+                        <UserCircle size={18} className="text-indigo-600" />
+                        {user?.name || 'Unknown Keeper'}
+                      </h3>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">
+                        {staffShifts.length} scheduled shifts • {user?.role ? user.role.replace(/_/g, ' ') : 'Staff'}
+                      </p>
+                    </div>
+                    
+                    {hasPermission('staff:manage') && (
+                      <button 
+                        onClick={() => {
+                          if (confirmWipeId === user.id) {
+                            wipeFutureShifts.mutate(user.id);
+                          } else {
+                            setConfirmWipeId(user.id);
+                            setTimeout(() => setConfirmWipeId(null), 3000);
+                          }
+                        }}
+                        disabled={wipeFutureShifts.isPending}
+                        className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all border shadow-sm ${
+                          confirmWipeId === user.id
+                            ? 'bg-rose-600 text-white border-rose-700 animate-pulse'
+                            : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                        } disabled:opacity-50 flex items-center gap-1.5`}
+                      >
+                        {wipeFutureShifts.isPending && wipeFutureShifts.variables === user.id ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={12} />
+                        )}
+                        <span>{confirmWipeId === user.id ? 'Confirm Wipe Future' : 'Wipe Future Shifts'}</span>
+                      </button>
+                    )}
+                  </div>
 
-      {/* GENERATOR MODAL */}
+                  <div className="overflow-x-auto max-h-80 custom-scrollbar">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50/50 sticky top-0 border-b border-slate-100 text-[9px] font-black uppercase tracking-widest text-slate-500 backdrop-blur-md">
+                        <tr>
+                          <th className="py-2.5 px-4">Date</th>
+                          <th className="py-2.5 px-4">Time</th>
+                          <th className="py-2.5 px-4">Assignment</th>
+                          <th className="py-2.5 px-4">Notes</th>
+                          <th className="py-2.5 px-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {staffShifts.map((shift) => {
+                          const startObj = new Date(shift.start_time);
+                          const endObj = new Date(shift.end_time);
+
+                          return (
+                            <tr key={shift.id} className="hover:bg-slate-50/60 transition-colors">
+                              <td className="py-2.5 px-4 font-bold text-slate-900">
+                                {format(startObj, 'dd MMM yyyy')}
+                              </td>
+                              <td className="py-2.5 px-4 text-slate-600 font-medium">
+                                {format(startObj, 'HH:mm')} – {format(endObj, 'HH:mm')}
+                              </td>
+                              <td className="py-2.5 px-4">
+                                <span className="inline-flex items-center gap-1 bg-slate-100 px-2 py-0.5 rounded text-[10px] font-bold text-slate-700">
+                                  <MapPin size={10} className="text-slate-400" />
+                                  {shift.assigned_area || 'General Duties'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-4 text-slate-500 text-[11px] truncate max-w-xs">
+                                {shift.notes || '--'}
+                              </td>
+                              <td className="py-2.5 px-4 text-right">
+                                {hasPermission('staff:manage') && (
+                                  <button 
+                                    onClick={() => {
+                                      if (confirmDeleteId === shift.id) {
+                                        deleteIndividualShift.mutate(shift.id);
+                                      } else {
+                                        setConfirmDeleteId(shift.id);
+                                        setTimeout(() => setConfirmDeleteId(null), 3000);
+                                      }
+                                    }}
+                                    disabled={deleteIndividualShift.isPending}
+                                    className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                                    title="Delete Shift"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* --- GENERATOR MODAL --- */}
       {isGeneratorOpen && (
         <ShiftGeneratorModal 
           staffMembers={staffMembers} 
@@ -351,7 +556,7 @@ function ShiftGeneratorModal({ staffMembers, onClose }: { staffMembers: any[], o
   const [userId, setUserId] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
   const [area, setArea] = useState('');
@@ -365,7 +570,8 @@ function ShiftGeneratorModal({ staffMembers, onClose }: { staffMembers: any[], o
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shifts_data'] });
-      toast.success('Pattern successfully generated and saved.');
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
+      toast.success('Shift pattern generated successfully.');
       onClose();
     },
     onError: (err: Error) => toast.error(`Generation Failed: ${err.message}`)
@@ -374,7 +580,7 @@ function ShiftGeneratorModal({ staffMembers, onClose }: { staffMembers: any[], o
   const handleGenerate = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!userId || !startDate || !endDate) return toast.error("Please fill out the staff member and date ranges.");
+    if (!userId || !startDate || !endDate) return toast.error("Please fill out the staff member and date range.");
     if (selectedDays.length === 0) return toast.error("Please select at least one working day.");
 
     const startObj = new Date(startDate);
@@ -406,7 +612,7 @@ function ShiftGeneratorModal({ staffMembers, onClose }: { staffMembers: any[], o
       current.setDate(current.getDate() + 1);
     }
 
-    if (payloads.length === 0) return toast.error("No valid days found within that date range.");
+    if (payloads.length === 0) return toast.error("No matching days found within that date range.");
     
     insertMutation.mutate(payloads);
   };
@@ -417,81 +623,120 @@ function ShiftGeneratorModal({ staffMembers, onClose }: { staffMembers: any[], o
     );
   };
 
-  const DAYS = [{label: 'Sun', val: 0}, {label: 'Mon', val: 1}, {label: 'Tue', val: 2}, {label: 'Wed', val: 3}, {label: 'Thu', val: 4}, {label: 'Fri', val: 5}, {label: 'Sat', val: 6}];
+  const DAYS = [
+    { label: 'Mon', val: 1 },
+    { label: 'Tue', val: 2 },
+    { label: 'Wed', val: 3 },
+    { label: 'Thu', val: 4 },
+    { label: 'Fri', val: 5 },
+    { label: 'Sat', val: 6 },
+    { label: 'Sun', val: 0 }
+  ];
+
+  const inputClass = "w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs lg:text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all shadow-sm placeholder:text-slate-400";
+  const labelClass = "text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 block";
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
-        <div className="p-5 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-          <h2 className="font-bold text-gray-900 text-lg">Generate 3-Month Pattern</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-900 font-bold text-xl">&times;</button>
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 font-sans overflow-y-auto custom-scrollbar">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg flex flex-col shadow-2xl relative overflow-hidden my-auto animate-in zoom-in-95 duration-200">
+        
+        <div className="bg-slate-50 border-b border-slate-100 p-5 flex justify-between items-center z-20 shrink-0 rounded-t-2xl">
+          <div>
+            <h2 className="text-base lg:text-lg font-black text-slate-900 uppercase tracking-tight flex items-center gap-2">
+              <Sparkles size={18} className="text-indigo-600" /> Generate Shift Pattern
+            </h2>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Automated batch scheduling (up to 90 days)</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-100 transition-colors">
+            <X size={18} />
+          </button>
         </div>
         
-        <form onSubmit={handleGenerate} className="p-6 space-y-4">
-          <div>
-            <label className="block text-xs font-bold text-gray-600 mb-1">Target Keeper</label>
-            <select required value={userId} onChange={e => setUserId(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg text-sm bg-white">
-              <option value="">Select Staff Member...</option>
-              {staffMembers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
+        <div className="p-6 overflow-y-auto max-h-[75vh]">
+          <form id="generator-form" onSubmit={handleGenerate} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-gray-600 mb-1">Start Date</label>
-              <input type="date" required value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg text-sm" />
+              <label className={labelClass}>Target Staff Member *</label>
+              <select required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass}>
+                <option value="">Select Staff Member...</option>
+                {staffMembers
+                  .filter((s: any) => !s.is_deleted && s.is_active !== false)
+                  .map((s: any) => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.role?.replace(/_/g, ' ') || 'Staff'})</option>
+                  ))}
+              </select>
             </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass}>Start Date *</label>
+                <input type="date" required value={startDate} onChange={e => setStartDate(e.target.value)} className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>End Date *</label>
+                <input type="date" required value={endDate} onChange={e => setEndDate(e.target.value)} className={inputClass} />
+              </div>
+            </div>
+
             <div>
-              <label className="block text-xs font-bold text-gray-600 mb-1">End Date (Max 90 days)</label>
-              <input type="date" required value={endDate} onChange={e => setEndDate(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg text-sm" />
+              <label className={labelClass}>Working Days *</label>
+              <div className="grid grid-cols-7 gap-1.5">
+                {DAYS.map(day => (
+                  <button 
+                    key={day.val}
+                    type="button"
+                    onClick={() => toggleDay(day.val)}
+                    className={`py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-sm ${
+                      selectedDays.includes(day.val)
+                        ? 'bg-slate-900 text-white shadow-slate-900/20'
+                        : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {day.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
 
-          <div>
-            <label className="block text-xs font-bold text-gray-600 mb-2">Days of the Week</label>
-            <div className="flex justify-between gap-1">
-              {DAYS.map(day => (
-                <button 
-                  key={day.val}
-                  type="button"
-                  onClick={() => toggleDay(day.val)}
-                  className={`flex-1 py-2 rounded border text-sm font-bold transition-colors ${selectedDays.includes(day.val) ? 'bg-blue-600 border-blue-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-600 hover:bg-gray-100'}`}
-                >
-                  {day.label}
-                </button>
-              ))}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass}>Start Time *</label>
+                <input type="time" required value={startTime} onChange={e => setStartTime(e.target.value)} className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>End Time *</label>
+                <input type="time" required value={endTime} onChange={e => setEndTime(e.target.value)} className={inputClass} />
+              </div>
             </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-bold text-gray-600 mb-1">Start Time</label>
-              <input type="time" required value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg text-sm" />
+              <label className={labelClass}>Assigned Area (Optional)</label>
+              <input type="text" value={area} onChange={e => setArea(e.target.value)} placeholder="e.g. Flight Yard, Aviary Section" className={inputClass} />
             </div>
+
             <div>
-              <label className="block text-xs font-bold text-gray-600 mb-1">End Time</label>
-              <input type="time" required value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg text-sm" />
+              <label className={labelClass}>Shift Notes (Optional)</label>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className={`${inputClass} resize-none h-16`} placeholder="General instructions for this shift pattern..." />
             </div>
-          </div>
+          </form>
+        </div>
 
-          <div>
-            <label className="block text-xs font-bold text-gray-600 mb-1">Assigned Area (Optional)</label>
-            <input type="text" value={area} onChange={e => setArea(e.target.value)} placeholder="e.g. Flight Yard" className="w-full p-2 border border-gray-300 rounded-lg text-sm" />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-gray-600 mb-1">Notes (Optional)</label>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className="w-full p-2 border border-gray-300 rounded-lg text-sm resize-none" />
-          </div>
-
-          <div className="pt-4 flex justify-end gap-3 border-t border-gray-200">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
-            <button type="submit" disabled={insertMutation.isPending} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-lg disabled:opacity-50">
-              {insertMutation.isPending ? 'Generating...' : 'Save Matrix'}
-            </button>
-          </div>
-        </form>
+        <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-3 z-20 shrink-0 rounded-b-2xl">
+          <button type="button" onClick={onClose} className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">
+            Cancel
+          </button>
+          <button 
+            type="submit" 
+            form="generator-form"
+            disabled={insertMutation.isPending} 
+            className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 flex items-center gap-2 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-md active:scale-95"
+          >
+            {insertMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} className="text-indigo-400" />}
+            <span>{insertMutation.isPending ? 'Generating...' : 'Generate Matrix'}</span>
+          </button>
+        </div>
       </div>
     </div>
   );
 }
+
+export default ShiftsModule;

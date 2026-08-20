@@ -1,14 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
-import { Building, Loader2, Save, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Building, Loader2, Save, Globe, Mail, Phone, MapPin, FileCheck, ExternalLink, Image as ImageIcon } from 'lucide-react';
+import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
 import { ImageUploader } from '../components/ui/ImageUploader';
 import { OrganizationProfile } from '../types';
 
 // ------------------------------------------------------------------
-// STRICT OFFLINE QUERY OPTIONS
+// 1. STRICT OFFLINE QUERY OPTIONS
 // ------------------------------------------------------------------
 const orgSettingsOptions = queryOptions({
   queryKey: ['org_settings'],
@@ -26,24 +27,22 @@ const orgSettingsOptions = queryOptions({
 export const Route = createFileRoute('/settings/organization')({
   loader: async ({ context: { queryClient } }) => {
     // @ts-ignore
-    await queryClient.ensureQueryData(orgSettingsOptions);
+    if (queryClient) await queryClient.ensureQueryData(orgSettingsOptions);
   },
   component: OrgProfilePage,
 });
 
 // ------------------------------------------------------------------
-// MAIN COMPONENT
+// 2. MAIN COMPONENT
 // ------------------------------------------------------------------
 export function OrgProfilePage() {
   const queryClient = useQueryClient();
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
   const { data: settings = {}, isLoading } = useQuery(orgSettingsOptions);
 
   const saveMutation = useMutation({
     mutationFn: async (payload: any) => {
-      // Fetch the actual ID from the database if one exists, otherwise rely on UPSERT constraints
       const idToUpsert = settings.id || undefined; 
       
       const upsertPayload = idToUpsert 
@@ -60,12 +59,10 @@ export function OrgProfilePage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['org_settings'] });
-      setToast({ message: 'Settings saved successfully!', type: 'success' });
-      setTimeout(() => setToast(null), 3000);
+      toast.success('Organisation profile saved successfully.');
     },
     onError: (err: any) => {
-      setToast({ message: err.message || 'Failed to save settings.', type: 'error' });
-      setTimeout(() => setToast(null), 5000);
+      toast.error(`Save failed: ${err.message || 'Could not update organisation profile.'}`);
     }
   });
 
@@ -88,7 +85,7 @@ export function OrgProfilePage() {
   const handleLogoUpload = async (fileOrUrl: string | Blob | null) => {
     if (fileOrUrl instanceof Blob) {
       if (!navigator.onLine) {
-        setToast({ message: 'Cannot upload images while offline.', type: 'error' });
+        toast.error('Cannot upload logo assets while offline.');
         return;
       }
       setIsUploading(true);
@@ -102,20 +99,21 @@ export function OrgProfilePage() {
 
         const { data: files } = await supabase.storage.from('koa-attachments').list('logos');
         if (files && files.length > 0) {
-            await supabase.storage.from('koa-attachments').remove(files.map(f => `logos/${f.name}`));
+          await supabase.storage.from('koa-attachments').remove(files.map(f => `logos/${f.name}`));
         }
 
         const { error: uploadError } = await supabase.storage.from('koa-attachments').upload(filePath, fileToUpload, { 
-            upsert: true,
-            contentType: fileToUpload.type,
-            cacheControl: '3600'
+          upsert: true,
+          contentType: fileToUpload.type,
+          cacheControl: '3600'
         });
         if (uploadError) throw uploadError;
 
         const { data } = supabase.storage.from('koa-attachments').getPublicUrl(filePath);
         form.setFieldValue('logo_url', `${data.publicUrl}?t=${Date.now()}`);
+        toast.success('Logo asset uploaded.');
       } catch (err: any) {
-        setToast({ message: 'Upload failed: ' + err.message, type: 'error' });
+        toast.error(`Upload failed: ${err.message}`);
       } finally {
         setIsUploading(false);
       }
@@ -124,103 +122,221 @@ export function OrgProfilePage() {
     }
   };
 
-  if (isLoading) return <div className="flex justify-center p-12"><Loader2 className="animate-spin text-blue-600" /></div>;
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[300px] text-slate-400 gap-3">
+        <Loader2 className="animate-spin text-slate-600" size={28} />
+        <span className="text-xs font-black uppercase tracking-widest text-slate-600">Loading Organisation Profile...</span>
+      </div>
+    );
+  }
 
-  const inputClass = "mt-1 block w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 text-sm font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all outline-none";
-  const labelClass = "block text-xs font-bold text-slate-500 uppercase tracking-wider";
+  const inputClass = "w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs lg:text-sm font-bold text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 transition-all shadow-sm placeholder:text-slate-400";
+  const labelClass = "block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5";
+  const sectionTitleClass = "text-xs font-black text-slate-900 uppercase tracking-widest flex items-center gap-2 mb-4 pb-2 border-b border-slate-100";
 
   return (
-    <div className="space-y-6 relative animate-in fade-in duration-300">
-      {toast && (
-        <div className={`absolute -top-4 right-0 p-4 rounded-xl flex items-center gap-3 text-sm font-bold shadow-lg z-50 transition-all ${toast.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'}`}>
-          {toast.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />} {toast.message}
-        </div>
-      )}
-
-      <form onSubmit={(e) => { e.preventDefault(); form.handleSubmit(); }} className="space-y-6">
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-          <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2 mb-6">
-            <Building size={16} /> Organisation Identity
-          </h2>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <div className="flex flex-col gap-2">
-              <label className={labelClass}>Logo</label>
-              <form.Subscribe selector={(state) => state.values.logo_url} children={(url) => (
-                <div className="w-full relative">
-                  {isUploading && (
-                    <div className="absolute inset-0 z-10 bg-white/80 backdrop-blur-sm border border-slate-200 border-dashed rounded-xl flex flex-col items-center justify-center text-blue-600 font-bold text-xs gap-3">
-                      <Loader2 className="animate-spin" size={24} /> Uploading...
-                    </div>
-                  )}
-                  <ImageUploader value={url} onChange={handleLogoUpload} requireCrop={true} />
-                </div>
-              )} />
-            </div>
-
-            <div className="md:col-span-2 space-y-4">
-              <form.Field name="org_name" children={(field) => (
-                <div>
-                  <label className={labelClass}>Academy Name</label>
-                  <input value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-                </div>
-              )} />
-              <form.Field name="license_number" children={(field) => (
-                <div>
-                  <label className={labelClass}>Zoo Licence Number</label>
-                  <input value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-                </div>
-              )} />
-            </div>
-          </div>
+    <div className="h-full flex flex-col space-y-4 animate-in fade-in duration-300 relative">
+      
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0 pb-1">
+        <div>
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-900">
+            Organisation Profile & ZLA Metadata
+          </h3>
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">
+            Licensing numbers, letterhead branding, address & public portal endpoints
+          </p>
         </div>
 
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-          <form.Field name="address" children={(field) => (
-            <div>
-              <label className={labelClass}>Headquarters Address</label>
-              <textarea value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={`${inputClass} h-24 resize-none`} />
-            </div>
-          )} />
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
-            <form.Field name="contact_email" children={(field) => (
-              <div>
-                <label className={labelClass}>Professional Email</label>
-                <input type="email" value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-              </div>
-            )} />
-            <form.Field name="contact_phone" children={(field) => (
-              <div>
-                <label className={labelClass}>Academy Phone</label>
-                <input value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-              </div>
-            )} />
-            <form.Field name="website" children={(field) => (
-              <div>
-                <label className={labelClass}>Official Website</label>
-                <input value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-              </div>
-            )} />
-            <form.Field name="adoptionurl" children={(field) => (
-              <div>
-                <label className={labelClass}>Adoption Portal</label>
-                <input value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} className={inputClass} />
-              </div>
-            )} />
-          </div>
-        </div>
-
-        <div className="flex justify-end">
+        <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+          {([canSubmit, isSubmitting]) => (
             <button 
-            type="submit" 
-            disabled={saveMutation.isPending || isUploading}
-            className="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold uppercase text-xs tracking-widest hover:bg-blue-700 shadow-sm disabled:opacity-50 flex items-center gap-2"
+              type="submit" 
+              form="org-profile-form"
+              disabled={!canSubmit || isSubmitting as boolean || saveMutation.isPending || isUploading}
+              className="flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95 shrink-0 w-full sm:w-auto"
             >
-            {saveMutation.isPending ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />} Save Changes
+              {(isSubmitting || saveMutation.isPending) ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Save size={14} className="text-emerald-400" />
+              )}
+              <span>Save Changes</span>
             </button>
-        </div>
-      </form>
+          )}
+        </form.Subscribe>
+      </div>
+
+      {/* Form Container */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
+        <form 
+          id="org-profile-form" 
+          onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} 
+          className="space-y-5"
+        >
+          {/* Card 1: Branding & Identity */}
+          <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+            <h4 className={sectionTitleClass}>
+              <Building size={15} className="text-slate-500" /> Brand Identity & Zoo Licensing
+            </h4>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Logo Column */}
+              <div className="lg:col-span-4 flex flex-col gap-2">
+                <label className={labelClass}>Official Zoo Letterhead Logo</label>
+                <form.Subscribe selector={(state) => state.values.logo_url} children={(url) => (
+                  <div className="w-full relative">
+                    {isUploading && (
+                      <div className="absolute inset-0 z-10 bg-white/80 backdrop-blur-sm border border-slate-200 border-dashed rounded-2xl flex flex-col items-center justify-center text-slate-800 font-black text-xs uppercase tracking-widest gap-2">
+                        <Loader2 className="animate-spin text-slate-800" size={22} /> Uploading Asset...
+                      </div>
+                    )}
+                    <ImageUploader value={url} onChange={handleLogoUpload} requireCrop={true} />
+                  </div>
+                )} />
+                <span className="text-[10px] font-medium text-slate-400 leading-snug mt-1">
+                  Square or horizontal PNG/JPEG with transparent background recommended.
+                </span>
+              </div>
+
+              {/* Identity Fields */}
+              <div className="lg:col-span-8 space-y-4">
+                <form.Field name="org_name" children={(field) => (
+                  <div>
+                    <label className={labelClass}>Registered Facility / Academy Name *</label>
+                    <input 
+                      required 
+                      placeholder="e.g. Kent Owl Academy" 
+                      value={field.state.value} 
+                      onBlur={field.handleBlur} 
+                      onChange={(e) => field.handleChange(e.target.value)} 
+                      className={inputClass} 
+                    />
+                  </div>
+                )} />
+
+                <form.Field name="license_number" children={(field) => (
+                  <div>
+                    <label className={labelClass}>Official Zoo Licensing Act (ZLA) Number *</label>
+                    <div className="relative">
+                      <FileCheck className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      <input 
+                        required 
+                        placeholder="e.g. ZOO/2026/0491-KOA" 
+                        value={field.state.value} 
+                        onBlur={field.handleBlur} 
+                        onChange={(e) => field.handleChange(e.target.value)} 
+                        className={`${inputClass} pl-9 font-mono tracking-wide`} 
+                      />
+                    </div>
+                  </div>
+                )} />
+              </div>
+            </div>
+          </div>
+
+          {/* Card 2: Contact & Statutory Location */}
+          <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+            <h4 className={sectionTitleClass}>
+              <MapPin size={15} className="text-slate-500" /> Operational Headquarters & Public Channels
+            </h4>
+
+            <form.Field name="address" children={(field) => (
+              <div>
+                <label className={labelClass}>Headquarters Physical Address *</label>
+                <div className="relative">
+                  <MapPin className="absolute left-3 top-3 text-slate-400" size={14} />
+                  <textarea 
+                    required 
+                    rows={3} 
+                    placeholder="Full physical site address including post code..." 
+                    value={field.state.value} 
+                    onBlur={field.handleBlur} 
+                    onChange={(e) => field.handleChange(e.target.value)} 
+                    className={`${inputClass} pl-9 py-2.5 resize-none h-20`} 
+                  />
+                </div>
+              </div>
+            )} />
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <form.Field name="contact_email" children={(field) => (
+                <div>
+                  <label className={labelClass}>Administrative Contact Email *</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input 
+                      type="email" 
+                      required 
+                      placeholder="admin@kentowlacademy.com" 
+                      value={field.state.value} 
+                      onBlur={field.handleBlur} 
+                      onChange={(e) => field.handleChange(e.target.value)} 
+                      className={`${inputClass} pl-9`} 
+                    />
+                  </div>
+                </div>
+              )} />
+
+              <form.Field name="contact_phone" children={(field) => (
+                <div>
+                  <label className={labelClass}>Emergency & Bookings Phone Number *</label>
+                  <div className="relative">
+                    <Phone className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input 
+                      type="tel" 
+                      required 
+                      placeholder="07535471588" 
+                      value={field.state.value} 
+                      onBlur={field.handleBlur} 
+                      onChange={(e) => field.handleChange(e.target.value)} 
+                      className={`${inputClass} pl-9`} 
+                    />
+                  </div>
+                </div>
+              )} />
+
+              <form.Field name="website" children={(field) => (
+                <div>
+                  <label className={labelClass}>Official Public Website</label>
+                  <div className="relative">
+                    <Globe className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input 
+                      type="url" 
+                      placeholder="https://www.kentowlacademy.com" 
+                      value={field.state.value} 
+                      onBlur={field.handleBlur} 
+                      onChange={(e) => field.handleChange(e.target.value)} 
+                      className={`${inputClass} pl-9`} 
+                    />
+                  </div>
+                </div>
+              )} />
+
+              <form.Field name="adoptionurl" children={(field) => (
+                <div>
+                  <label className={labelClass}>Animal Adoption Portal URL</label>
+                  <div className="relative">
+                    <ExternalLink className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input 
+                      type="url" 
+                      placeholder="https://www.kentowlacademy.com/adoptions" 
+                      value={field.state.value} 
+                      onBlur={field.handleBlur} 
+                      onChange={(e) => field.handleChange(e.target.value)} 
+                      className={`${inputClass} pl-9`} 
+                    />
+                  </div>
+                </div>
+              )} />
+            </div>
+          </div>
+        </form>
+      </div>
+
     </div>
   );
 }
+
+export default OrgProfilePage;

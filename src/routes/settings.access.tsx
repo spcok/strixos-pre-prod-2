@@ -1,55 +1,101 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { 
   ShieldCheck, UserPlus, Key, Mail, Loader2, X, AlertTriangle, 
-  WifiOff, Phone, MapPin, Calendar, HeartPulse, CheckCircle2, Lock, Edit2, Save
+  WifiOff, Phone, MapPin, Calendar, HeartPulse, CheckCircle2, Lock, 
+  Edit2, Save, Search, UserCircle, ShieldAlert, Check
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { createClient } from '@supabase/supabase-js';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const systemUsersOptions = queryOptions({
+  queryKey: ['system_users'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .order('name');
+    if (error) throw error;
+    return data || [];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
 export const Route = createFileRoute('/settings/access')({
+  loader: async ({ context: { queryClient } }) => {
+    // @ts-ignore
+    if (queryClient) await queryClient.ensureQueryData(systemUsersOptions);
+  },
   component: AccessControlPage,
 });
 
 // ------------------------------------------------------------------
-// UPDATED GRANULAR RBAC DEFINITIONS (5-Tier)
+// 2. GRANULAR RBAC DEFINITIONS (5-Tier)
 // ------------------------------------------------------------------
 const ROLE_PERMISSIONS: Record<string, { desc: string, grants: string[], restrictions: string[] }> = {
   VOLUNTEER: {
-    desc: "Restricted entry-level access. Primarily read-only with basic logging capabilities.",
-    grants: ["Read Daily Logs", "Read Feeding Records", "View Rotas"],
-    restrictions: ["Cannot write medical records", "Cannot edit animal profiles", "Cannot access HR data"]
+    desc: "Entry-level operational access. Primarily read-only with basic logging capabilities.",
+    grants: ["Read Daily Logs", "Read Feeding Records", "View Staff Rotas"],
+    restrictions: ["Cannot write clinical records", "Cannot alter animal profiles", "Cannot access HR or financial records"]
   },
   KEEPER: {
-    desc: "Standard operational staff. Focused on daily animal care and husbandry.",
-    grants: ["Read/Write Daily Logs", "Read/Write Feeding Records", "View Animal Profiles", "Log Basic Maintenance"],
-    restrictions: ["Cannot alter medical/clinical records", "Cannot view organizational HR data", "Cannot approve internal movements"]
+    desc: "Standard operational staff. Focused on daily animal husbandry, feeding, and maintenance.",
+    grants: ["Read/Write Daily Logs", "Read/Write Feeding Records", "View Animal Profiles", "Log Enclosure Maintenance"],
+    restrictions: ["Cannot alter clinical medical records", "Cannot access staff HR records", "Cannot approve animal transfers"]
   },
   SENIOR_KEEPER: {
-    desc: "Elevated operational control. Oversees standard keepers and approves logistics.",
-    grants: ["All Keeper Permissions", "Approve Internal Movements", "Create Rotas & Assign Shifts", "Access Clinical & Medical Records"],
-    restrictions: ["Cannot manage user access", "Cannot alter ZLA configuration"]
+    desc: "Elevated operational supervisor. Manages husbandry teams, clinical logs, and shift rosters.",
+    grants: ["All Keeper Permissions", "Approve Internal Movements", "Create Rotas & Assign Shifts", "Access Clinical Records"],
+    restrictions: ["Cannot manage user provisioning", "Cannot alter ZLA statutory settings"]
   },
   DIRECTOR: {
-    desc: "Facility Director / Owner. Unrestricted operational and logistical access.",
-    grants: ["All Senior Keeper Permissions", "Manage Financial/Audit Logs", "Alter ZLA Organization Profile", "Approve External Transfers"],
-    restrictions: ["Cannot modify core system engineering"]
+    desc: "Facility Director / Owner. Complete operational, financial, and logistical oversight.",
+    grants: ["All Senior Keeper Permissions", "Financial & Audit Logs", "Alter ZLA Organization Profile", "Approve External Transfers"],
+    restrictions: ["Cannot alter core database schemas directly"]
   },
   ADMIN: {
-    desc: "System Administrator. Absolute root control over the StrixOS instance.",
-    grants: ["Provision & Suspend Users", "Alter Granular RBAC Configurations", "Access Raw System Audits", "Bypass all constraints"],
-    restrictions: ["None (Root Access)"]
+    desc: "System Administrator. Unrestricted root control over the StrixOS instance.",
+    grants: ["Provision & Suspend Accounts", "Configure RBAC Matrices", "Access Raw Security Audits", "Bypass System Constraints"],
+    restrictions: ["None (Root Level Access)"]
   }
 };
 
+const ROLE_TABS = ['ALL', 'ADMIN', 'DIRECTOR', 'SENIOR_KEEPER', 'KEEPER', 'VOLUNTEER'] as const;
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 1024);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+  return isMobile;
+}
+
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function AccessControlPage() {
   const queryClient = useQueryClient();
-  const { profile } = useAuth();
+  const { profile, hasPermission } = useAuth();
+  const isMobile = useIsMobile();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   
   const [modalState, setModalState] = useState<{ isOpen: boolean, userToEdit?: any }>({ isOpen: false });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
@@ -63,131 +109,245 @@ export function AccessControlPage() {
     };
   }, []);
 
-  const { data: users = [], isLoading } = useQuery({
-    queryKey: ['system_users'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('users').select('*').order('name');
-      if (error) throw error;
-      return data || [];
-    },
-    meta: { persist: true }
+  // Supabase Realtime Sync
+  useEffect(() => {
+    const channel = supabase.channel('system-users-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['system_users'] });
+      }).subscribe();
+      
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  const { data: users = [], isLoading } = useQuery(systemUsersOptions);
+
+  const filteredUsers = useMemo(() => {
+    let result = users;
+
+    if (roleFilter !== 'ALL') {
+      result = result.filter((u: any) => u.role === roleFilter);
+    }
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter((u: any) => 
+        (u.name || '').toLowerCase().includes(q) ||
+        (u.email || '').toLowerCase().includes(q) ||
+        (u.role || '').toLowerCase().includes(q) ||
+        (u.phone || '').toLowerCase().includes(q)
+      );
+    }
+
+    return result;
+  }, [users, roleFilter, searchQuery]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredUsers.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => isMobile ? 190 : 80,
+    overscan: 5,
   });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const tableGridCols = "minmax(240px, 1.8fr) minmax(200px, 1.4fr) minmax(150px, 1fr) minmax(130px, 0.9fr) minmax(100px, 0.7fr)";
 
   const getRoleBadge = (role: string) => {
     switch (role) {
-      case 'ADMIN': return 'bg-rose-100 text-rose-700 border-rose-200';
-      case 'DIRECTOR': return 'bg-purple-100 text-purple-700 border-purple-200';
-      case 'SENIOR_KEEPER': return 'bg-amber-100 text-amber-700 border-amber-200';
-      case 'KEEPER': return 'bg-blue-100 text-blue-700 border-blue-200';
-      default: return 'bg-slate-100 text-slate-700 border-slate-200'; // VOLUNTEER
+      case 'ADMIN': return 'bg-rose-50 text-rose-700 border-rose-200';
+      case 'DIRECTOR': return 'bg-purple-50 text-purple-700 border-purple-200';
+      case 'SENIOR_KEEPER': return 'bg-amber-50 text-amber-700 border-amber-200';
+      case 'KEEPER': return 'bg-blue-50 text-blue-700 border-blue-200';
+      default: return 'bg-slate-100 text-slate-700 border-slate-200';
     }
   };
 
-  if (profile?.role !== 'ADMIN' && profile?.role !== 'DIRECTOR') {
+  const isDirectorOrAdmin = ['DIRECTOR', 'ADMIN'].includes(profile?.role || '') || hasPermission('users:manage');
+
+  if (!isDirectorOrAdmin) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-        <ShieldCheck size={48} className="mb-4 opacity-20" />
-        <h2 className="text-lg font-black uppercase tracking-widest">Unauthorized Area</h2>
-        <p className="text-sm font-bold mt-2">Only Directors and Administrators can access account provisioning.</p>
+        <ShieldAlert size={48} className="mb-4 opacity-20 text-slate-500" />
+        <h2 className="text-sm font-black uppercase tracking-widest text-slate-800">Restricted Access Area</h2>
+        <p className="text-xs font-medium text-slate-500 mt-1 max-w-sm text-center">Only Directors and Administrators hold provisioning permissions for StrixOS user credentials.</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6 relative animate-in fade-in duration-300">
+    <div className="h-full flex flex-col space-y-4 animate-in fade-in duration-300 relative">
       
       {!isOnline && (
-        <div className="absolute inset-0 z-50 bg-slate-100/80 backdrop-blur-sm flex flex-col items-center justify-center rounded-2xl">
-          <div className="bg-white p-6 rounded-2xl shadow-xl border border-slate-200 flex flex-col items-center text-center max-w-sm">
-            <WifiOff className="text-rose-600 mb-4" size={32} />
-            <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight mb-2">Network Required</h2>
-            <p className="text-xs font-bold text-slate-500">Managing secure user accounts requires a direct connection to the backend. Please reconnect.</p>
-          </div>
+        <div className="bg-rose-50 border border-rose-200 p-3.5 rounded-xl flex items-center gap-3 text-rose-800 text-xs font-bold shrink-0 shadow-sm">
+          <WifiOff size={16} className="text-rose-600 shrink-0" />
+          <span>Offline Mode: Managing secure user identities requires an active network connection to Supabase Auth.</span>
         </div>
       )}
 
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b-2 border-slate-200 pb-6">
-        <div>
-          <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
-            <ShieldCheck className="text-emerald-600" size={24} /> Access & Provisioning
-          </h3>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Manage Staff Profiles & RBAC Definitions</p>
+      {/* --- CONTROLS BAR --- */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
+        <div className="relative flex-1 min-w-[200px] w-full sm:w-80">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+          <input 
+            type="text" 
+            placeholder="Search staff by name, email, phone, role..." 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-slate-900 transition-all shadow-sm placeholder:text-slate-400"
+          />
         </div>
+
         <button 
           onClick={() => setModalState({ isOpen: true, userToEdit: null })}
           disabled={!isOnline}
-          className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-sm shrink-0"
+          className="flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95 shrink-0 w-full sm:w-auto"
         >
-          <UserPlus size={16} /> Provision New Account
+          <UserPlus size={14} className="text-emerald-400" />
+          <span>Provision Account</span>
         </button>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        {isLoading ? (
-          <div className="flex justify-center py-12"><Loader2 className="animate-spin text-emerald-500" size={32} /></div>
-        ) : (
-          <div className="overflow-x-auto custom-scrollbar">
-            <table className="w-full text-left text-sm whitespace-nowrap min-w-[1000px]">
-              <thead className="bg-slate-50 border-b border-slate-200">
-                <tr>
-                  <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Staff Member</th>
-                  <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Contact</th>
-                  <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">System Role</th>
-                  <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Offline PIN</th>
-                  <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {users.map((u: any) => (
-                  <tr key={u.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-black text-slate-600 uppercase shrink-0 border border-slate-300">
-                          {u.initials || 'U'}
-                        </div>
-                        <div>
-                          <p className="font-bold text-slate-900 flex items-center gap-2">
-                            {u.name}
-                            {u.is_active === false && <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 text-[8px] uppercase tracking-widest font-black">Suspended</span>}
-                          </p>
-                          <p className="text-[10px] font-bold text-slate-400 font-mono">ID: {u.id.split('-')[0]}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex flex-col gap-0.5">
-                         <span className="text-xs font-medium text-slate-600">{u.email || 'No email linked'}</span>
-                         <span className="text-[10px] font-bold text-slate-400">{u.phone || 'No phone linked'}</span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`px-2.5 py-1 rounded text-[9px] font-black uppercase tracking-widest border ${getRoleBadge(u.role)}`}>
-                        {u.role.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
-                        <Key size={14} className={u.pin ? "text-emerald-500" : "text-slate-300"} />
-                        <span className="font-mono text-xs font-bold text-slate-600 tracking-widest">
-                          {u.pin ? '****' : 'UNSET'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <button 
-                        onClick={() => setModalState({ isOpen: true, userToEdit: u })}
-                        className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-transparent hover:border-emerald-200"
-                        title="Edit User Profile"
-                      >
-                        <Edit2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* --- ROLE PILL TABS --- */}
+      <div className="flex gap-1.5 w-full shrink-0 overflow-x-auto pb-1 custom-scrollbar">
+        {ROLE_TABS.map((role) => (
+          <button
+            key={role}
+            onClick={() => setRoleFilter(role)}
+            className={`px-3 py-1.5 rounded-xl text-[9px] lg:text-[10px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm flex items-center justify-center gap-1.5 shrink-0 ${
+              roleFilter === role 
+                ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20' 
+                : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
+            }`}
+          >
+            {role.replace(/_/g, ' ')}
+          </button>
+        ))}
+      </div>
+
+      {/* --- DATA GRID --- */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative">
+        {isLoading && (
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-10 flex items-center justify-center rounded-2xl">
+            <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center gap-3 border border-slate-100">
+              <Loader2 className="animate-spin text-slate-600" size={24} />
+              <span className="text-sm font-bold text-slate-700">Syncing Staff Identities...</span>
+            </div>
           </div>
         )}
+
+        <div ref={scrollParentRef} className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar bg-slate-50/30">
+          
+          {/* Desktop Table Header */}
+          <div className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-20 backdrop-blur-md" style={{ gridTemplateColumns: tableGridCols }}>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Staff Member</div>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Contact</div>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">System Role</div>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Offline PIN</div>
+            <div className="px-5 py-3.5 flex items-center justify-end text-right">Actions</div>
+          </div>
+
+          <div className="p-3 lg:p-0">
+            {filteredUsers.length === 0 && !isLoading ? (
+              <div className="p-8 text-center text-slate-500 flex flex-col items-center justify-center h-full">
+                <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center mb-3 border border-slate-200 shadow-sm">
+                  <ShieldCheck size={24} className="text-slate-400" />
+                </div>
+                <p className="font-black text-slate-700 mb-1 text-sm tracking-tight">No staff profiles found</p>
+                <p className="text-[10px] font-medium text-slate-400">Try adjusting your search query or role filter.</p>
+              </div>
+            ) : (
+              <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+                {virtualItems.map((virtualRow) => {
+                  const u = filteredUsers[virtualRow.index];
+                  const isSuspended = u.is_active === false;
+
+                  return (
+                    <div 
+                      key={u.id} 
+                      className={`absolute top-0 left-0 w-full grid grid-cols-1 lg:grid border border-slate-200 lg:border-none lg:border-b border-b-slate-100 rounded-xl lg:rounded-none p-3.5 lg:p-0 transition-colors shadow-sm lg:shadow-none gap-3 lg:gap-0 box-border ${
+                        isSuspended ? 'bg-rose-50/20 hover:bg-rose-50/40' : 'bg-white hover:bg-slate-50'
+                      }`}
+                      style={{ 
+                        gridTemplateColumns: isMobile ? '1fr' : tableGridCols,
+                        transform: `translateY(${virtualRow.start}px)`
+                      }}
+                    >
+                      {/* 1. Staff Identity Block */}
+                      <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-2 lg:gap-0">
+                        {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Staff Member</div>}
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-xs font-black text-slate-700 uppercase shrink-0 shadow-sm">
+                            {u.initials || u.name?.substring(0, 2) || 'U'}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="text-xs lg:text-sm font-bold text-slate-900 truncate" title={u.name}>
+                                {u.name}
+                              </p>
+                              {isSuspended && (
+                                <span className="px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 text-[8px] uppercase tracking-widest font-black shrink-0 border border-rose-200">
+                                  Suspended
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[9px] font-bold text-slate-400 font-mono tracking-wide mt-0.5">
+                              UID: {u.id?.substring(0, 8)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 2. Contact Details */}
+                      <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                        {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Contact</div>}
+                        <div className="space-y-0.5 min-w-0 w-full pr-2">
+                          <p className="text-xs font-medium text-slate-700 truncate" title={u.email}>
+                            {u.email || <span className="text-slate-400 italic text-[10px]">No email</span>}
+                          </p>
+                          <p className="text-[10px] font-bold text-slate-500 truncate" title={u.phone}>
+                            {u.phone || <span className="text-slate-400 font-normal text-[10px]">No phone</span>}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* 3. System Role */}
+                      <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                        {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Role</div>}
+                        <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest border shadow-sm w-fit ${getRoleBadge(u.role)}`}>
+                          {u.role ? u.role.replace(/_/g, ' ') : 'VOLUNTEER'}
+                        </span>
+                      </div>
+
+                      {/* 4. Offline PIN */}
+                      <div className="w-full lg:px-5 lg:py-3.5 flex lg:items-center justify-start min-w-0 flex-col lg:flex-row gap-1 lg:gap-0">
+                        {isMobile && <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Tablet PIN</div>}
+                        <div className="flex items-center gap-1.5">
+                          <Key size={12} className={u.pin ? "text-emerald-600 shrink-0" : "text-slate-300 shrink-0"} />
+                          <span className="font-mono text-xs font-bold text-slate-700 tracking-widest">
+                            {u.pin ? '••••' : <span className="text-[10px] text-slate-400 uppercase font-sans tracking-normal">Unset</span>}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* 5. Actions */}
+                      <div className={`w-full lg:px-5 lg:py-3.5 flex min-w-0 ${isMobile ? 'justify-end pt-2 border-t border-slate-100 mt-1' : 'items-center justify-end'}`}>
+                        <button 
+                          onClick={() => setModalState({ isOpen: true, userToEdit: u })}
+                          className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors"
+                          title="Edit User Profile & Permissions"
+                        >
+                          <Edit2 size={15} />
+                        </button>
+                      </div>
+
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {modalState.isOpen && (
@@ -201,7 +361,7 @@ export function AccessControlPage() {
 }
 
 // ------------------------------------------------------------------
-// UNIFIED MODAL (CREATE & EDIT) - StrixOS Utilitarian Styling
+// 4. UNIFIED MODAL (CREATE & EDIT)
 // ------------------------------------------------------------------
 function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -212,9 +372,8 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     mutationFn: async (payload: any) => {
       let targetUserId = existingUser?.id;
 
-      // SCENARIO 1: NEW USER PROVISIONING
+      // SCENARIO 1: NEW USER PROVISIONING VIA SUPABASE AUTH
       if (!isEditing) {
-        // EXACT MIRROR OF src/lib/supabase.ts ENVIRONMENT LOGIC
         const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
         const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
@@ -236,7 +395,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
         targetUserId = authData.user.id;
       }
 
-      // SCENARIO 2: DATABASE UPSERT (Shared logic for both New & Edit)
+      // SCENARIO 2: DATABASE UPSERT
       const initials = payload.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase();
       
       const dbPayload = {
@@ -261,6 +420,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['system_users'] });
+      toast.success(isEditing ? 'Staff profile updated.' : 'New account provisioned successfully.');
       onClose();
     },
     onError: (err: any) => setErrorMsg(err.message || `Failed to ${isEditing ? 'update' : 'provision'} account.`)
@@ -270,7 +430,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     defaultValues: { 
       name: existingUser?.name || '', 
       email: existingUser?.email || '', 
-      password: '', // Always empty, cannot be edited here
+      password: '', 
       role: existingUser?.role || 'KEEPER', 
       pin: existingUser?.pin || '',
       phone: existingUser?.phone || '', 
@@ -285,7 +445,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     onSubmit: async ({ value }) => {
       setErrorMsg(null);
       if (value.pin && value.pin.length !== 4) {
-        setErrorMsg("Offline PIN must be exactly 4 digits.");
+        setErrorMsg("Offline PIN must be exactly 4 numeric digits.");
         return;
       }
       if (!isEditing && (!value.password || value.password.length < 6)) {
@@ -296,50 +456,54 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     }
   });
 
-  const inputClass = "w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all";
+  const inputClass = "w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs lg:text-sm font-bold text-slate-900 focus:outline-none focus:border-slate-900 focus:ring-2 focus:ring-slate-900/20 transition-all shadow-sm placeholder:text-slate-400";
   const disabledClass = "opacity-60 bg-slate-100 cursor-not-allowed";
   const labelClass = "block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5";
-  const sectionTitleClass = "text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2 mb-4 pb-2 border-b border-slate-100";
+  const sectionTitleClass = "text-xs font-black text-slate-900 uppercase tracking-widest flex items-center gap-2 mb-3 pb-1.5 border-b border-slate-100";
 
   return (
-    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 border border-slate-200">
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 font-sans overflow-y-auto custom-scrollbar">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-5xl flex flex-col shadow-2xl relative overflow-hidden my-auto animate-in zoom-in-95 duration-200 max-h-[90vh]">
         
-        {/* Utilitarian Header */}
-        <div className="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50 shrink-0">
+        {/* Modal Header */}
+        <div className="bg-slate-50 border-b border-slate-100 p-5 flex justify-between items-center z-20 shrink-0 rounded-t-2xl">
           <div>
-            <h3 className="font-black text-slate-900 uppercase tracking-tight flex items-center gap-2 text-lg">
-              {isEditing ? <Edit2 size={20} className="text-emerald-600" /> : <UserPlus size={20} className="text-emerald-600" />}
+            <h2 className="text-base lg:text-lg font-black text-slate-900 uppercase tracking-tight flex items-center gap-2">
+              {isEditing ? <Edit2 size={18} className="text-slate-700" /> : <UserPlus size={18} className="text-slate-700" />}
               {isEditing ? 'Edit Staff Profile' : 'Comprehensive Staff Onboarding'}
-            </h3>
-            <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">
-              {isEditing ? `Managing ID: ${existingUser.id.split('-')[0]}` : 'Guided account generation & HR profile setup'}
+            </h2>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">
+              {isEditing ? `Managing UID: ${existingUser.id.substring(0, 8)}` : 'Guided account generation & HR profile setup'}
             </p>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-colors">
-            <X size={20} />
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-100 transition-colors">
+            <X size={18} />
           </button>
         </div>
         
-        <div className="flex flex-1 overflow-hidden">
+        {/* Modal Body: Form Left + RBAC Inspector Right */}
+        <div className="flex flex-col lg:flex-row flex-1 min-h-0 overflow-hidden">
           
-          {/* LEFT: THE FORM */}
+          {/* LEFT: The Form */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-white">
-            <form id="provisioning-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-8 max-w-2xl mx-auto">
+            <form id="provisioning-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-6">
               
               {errorMsg && (
-                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-sm font-bold flex items-center gap-3">
-                  <AlertTriangle size={18} className="shrink-0" /> {errorMsg}
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold flex items-center gap-2 shadow-sm">
+                  <AlertTriangle size={16} className="shrink-0" />
+                  <span>{errorMsg}</span>
                 </div>
               )}
 
-              {/* SECTION 1: Authentication */}
+              {/* 1. Authentication */}
               <div>
-                <h4 className={sectionTitleClass}><Lock size={16} className="text-slate-400" /> Secure Authentication</h4>
+                <h3 className={sectionTitleClass}>
+                  <Lock size={14} className="text-slate-400" /> Authentication Credentials
+                </h3>
                 {isEditing && (
-                   <p className="text-[10px] font-bold text-amber-600 uppercase tracking-widest mb-4 bg-amber-50 p-2 rounded border border-amber-200">
-                     Login Credentials (Email/Password) are locked by Auth security protocols.
-                   </p>
+                  <p className="text-[10px] font-bold text-amber-700 uppercase tracking-widest mb-3 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                    Primary login credentials are locked by Supabase Auth security policies.
+                  </p>
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <form.Field name="email" children={(field) => (
@@ -347,7 +511,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
                       <label className={labelClass}>Login Email *</label>
                       <div className="relative">
                         <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                        <input type="email" required disabled={isEditing} placeholder="name@kentowlacademy.com" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 ${isEditing ? disabledClass : ''}`} />
+                        <input type="email" required disabled={isEditing} placeholder="staff@kentowlacademy.com" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 ${isEditing ? disabledClass : ''}`} />
                       </div>
                     </div>
                   )} />
@@ -356,27 +520,29 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
                       <label className={labelClass}>{isEditing ? 'Password (Locked)' : 'Temporary Password *'}</label>
                       <div className="relative">
                         <Key className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                        <input type="password" required={!isEditing} disabled={isEditing} placeholder={isEditing ? '********' : 'Min. 6 characters'} value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 font-mono text-sm ${isEditing ? disabledClass : ''}`} />
+                        <input type="password" required={!isEditing} disabled={isEditing} placeholder={isEditing ? '••••••••' : 'Min. 6 characters'} value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 font-mono ${isEditing ? disabledClass : ''}`} />
                       </div>
                     </div>
                   )} />
                   <form.Field name="pin" children={(field) => (
                     <div className="md:col-span-2">
-                      <label className={labelClass}>Offline Tablet PIN (Optional)</label>
-                      <input type="password" maxLength={4} placeholder="4-Digit Code (e.g., 1234)" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value.replace(/\D/g, ''))} className={`${inputClass} font-mono tracking-widest`} />
+                      <label className={labelClass}>Offline Tablet PIN (Optional 4 Digits)</label>
+                      <input type="password" maxLength={4} placeholder="e.g. 1234" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value.replace(/\D/g, ''))} className={`${inputClass} font-mono tracking-widest`} />
                     </div>
                   )} />
                 </div>
               </div>
 
-              {/* SECTION 2: Personal Details */}
+              {/* 2. Personal Details */}
               <div>
-                <h4 className={sectionTitleClass}><UserPlus size={16} className="text-slate-400" /> Personal Details</h4>
+                <h3 className={sectionTitleClass}>
+                  <UserCircle size={14} className="text-slate-400" /> Personal Identity
+                </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <form.Field name="name" children={(field) => (
                     <div className="md:col-span-2">
                       <label className={labelClass}>Full Legal Name *</label>
-                      <input required placeholder="e.g. John Doe" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                      <input required placeholder="e.g. Jane Smith" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                     </div>
                   )} />
                   <form.Field name="phone" children={(field) => (
@@ -402,32 +568,34 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
                       <label className={labelClass}>Home Address</label>
                       <div className="relative">
                         <MapPin className="absolute left-3 top-3 text-slate-400" size={14} />
-                        <textarea rows={2} placeholder="Full physical address..." value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 py-2`} />
+                        <textarea rows={2} placeholder="Full physical residential address..." value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} pl-9 py-2 resize-none h-16`} />
                       </div>
                     </div>
                   )} />
                 </div>
               </div>
 
-              {/* SECTION 3: Emergency & HR */}
+              {/* 3. Emergency & HR */}
               <div>
-                <h4 className={sectionTitleClass}><HeartPulse size={16} className="text-slate-400" /> Emergency & HR Data</h4>
+                <h3 className={sectionTitleClass}>
+                  <HeartPulse size={14} className="text-slate-400" /> Emergency Contact & Employment Status
+                </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <form.Field name="emergency_contact_name" children={(field) => (
                     <div>
                       <label className={labelClass}>Emergency Contact Name</label>
-                      <input type="text" placeholder="e.g. Jane Doe (Wife)" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                      <input type="text" placeholder="e.g. John Smith (Partner)" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                     </div>
                   )} />
                   <form.Field name="emergency_contact_phone" children={(field) => (
                     <div>
                       <label className={labelClass}>Emergency Contact Phone</label>
-                      <input type="tel" placeholder="Primary phone number" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                      <input type="tel" placeholder="Primary emergency phone" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                     </div>
                   )} />
                   <form.Field name="start_date" children={(field) => (
                     <div>
-                      <label className={labelClass}>Employment Start Date</label>
+                      <label className={labelClass}>Employment Start Date *</label>
                       <input type="date" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                     </div>
                   )} />
@@ -436,8 +604,8 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
                       <div>
                         <label className={labelClass}>Account Status</label>
                         <select value={field.state.value ? 'true' : 'false'} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value === 'true')} className={inputClass}>
-                          <option value="true">ACTIVE</option>
-                          <option value="false">SUSPENDED</option>
+                          <option value="true">ACTIVE (Operational)</option>
+                          <option value="false">SUSPENDED (Access Revoked)</option>
                         </select>
                       </div>
                     )} />
@@ -445,7 +613,7 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
                   <form.Field name="hr_notes" children={(field) => (
                     <div className="md:col-span-2">
                       <label className={labelClass}>HR Notes / Medical Disclosures</label>
-                      <textarea rows={2} placeholder="Allergies, conditions, or HR specific notes..." value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                      <textarea rows={2} placeholder="Allergies, relevant health conditions, or confidential HR records..." value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} resize-none h-16`} />
                     </div>
                   )} />
                 </div>
@@ -454,71 +622,86 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
             </form>
           </div>
 
-          {/* RIGHT: RBAC VISUALIZER */}
-          <div className="w-96 bg-slate-50 border-l border-slate-200 p-6 flex flex-col shrink-0">
-            <h4 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2 mb-6">
-              <ShieldCheck size={16} className="text-emerald-500" /> Base RBAC Assignment
-            </h4>
-            
-            <form.Subscribe selector={(state) => state.values.role}>
-              {(selectedRole) => {
-                const matrix = ROLE_PERMISSIONS[selectedRole] || ROLE_PERMISSIONS['KEEPER'];
-                
-                return (
-                  <div className="space-y-6 flex-1">
-                    <form.Field name="role" children={(field) => (
-                      <div>
-                        <label className={labelClass}>Assign Base System Role</label>
-                        <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className="w-full p-3 bg-white border border-slate-200 rounded-xl text-sm font-black text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500 shadow-sm cursor-pointer">
-                          <option value="VOLUNTEER">VOLUNTEER</option>
-                          <option value="KEEPER">KEEPER</option>
-                          <option value="SENIOR_KEEPER">SENIOR KEEPER</option>
-                          <option value="DIRECTOR">DIRECTOR</option>
-                          <option value="ADMIN">SYSTEM ADMIN</option>
-                        </select>
-                      </div>
-                    )} />
+          {/* RIGHT: Granular RBAC Visualizer */}
+          <div className="w-full lg:w-88 bg-slate-50/80 border-t lg:border-t-0 lg:border-l border-slate-200 p-5 flex flex-col shrink-0 justify-between">
+            <div className="space-y-4">
+              <h3 className="text-xs font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+                <ShieldCheck size={16} className="text-slate-700" /> RBAC Permission Scope
+              </h3>
 
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-                      <div className="p-4 border-b border-slate-100 bg-slate-50">
-                        <p className="text-xs font-bold text-slate-600 leading-relaxed">{matrix.desc}</p>
-                      </div>
-                      
-                      <div className="p-4 space-y-4">
+              <form.Subscribe selector={(state) => state.values.role}>
+                {(selectedRole) => {
+                  const matrix = ROLE_PERMISSIONS[selectedRole] || ROLE_PERMISSIONS['KEEPER'];
+
+                  return (
+                    <div className="space-y-4">
+                      <form.Field name="role" children={(field) => (
                         <div>
-                          <h5 className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-2 flex items-center gap-1.5"><CheckCircle2 size={12} /> Standard Capabilities</h5>
-                          <ul className="space-y-1.5">
+                          <label className={labelClass}>Assigned System Role *</label>
+                          <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-black text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none shadow-sm cursor-pointer uppercase">
+                            <option value="VOLUNTEER">VOLUNTEER</option>
+                            <option value="KEEPER">KEEPER</option>
+                            <option value="SENIOR_KEEPER">SENIOR KEEPER</option>
+                            <option value="DIRECTOR">DIRECTOR</option>
+                            <option value="ADMIN">SYSTEM ADMIN</option>
+                          </select>
+                        </div>
+                      )} />
+
+                      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-3.5 space-y-3.5 text-xs">
+                        <p className="text-[11px] font-medium text-slate-600 leading-relaxed border-b border-slate-100 pb-3">
+                          {matrix.desc}
+                        </p>
+
+                        <div>
+                          <h4 className="text-[9px] font-black text-emerald-700 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                            <CheckCircle2 size={11} className="text-emerald-600" /> Standard Capabilities
+                          </h4>
+                          <ul className="space-y-1">
                             {matrix.grants.map((grant, idx) => (
-                              <li key={idx} className="text-[11px] font-bold text-slate-600 flex items-start gap-2">
-                                <span className="text-emerald-500 mt-0.5">•</span> {grant}
+                              <li key={idx} className="text-[10px] font-bold text-slate-700 flex items-start gap-1.5">
+                                <span className="text-emerald-500 font-black">•</span> {grant}
                               </li>
                             ))}
                           </ul>
                         </div>
-                        
+
                         <div>
-                          <h5 className="text-[10px] font-black text-rose-600 uppercase tracking-widest mb-2 flex items-center gap-1.5"><Lock size={12} /> Hard Restrictions</h5>
-                          <ul className="space-y-1.5">
+                          <h4 className="text-[9px] font-black text-rose-700 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                            <Lock size={11} className="text-rose-600" /> Hard Restrictions
+                          </h4>
+                          <ul className="space-y-1">
                             {matrix.restrictions.map((restriction, idx) => (
-                              <li key={idx} className="text-[11px] font-bold text-slate-600 flex items-start gap-2">
-                                <span className="text-rose-500 mt-0.5">×</span> {restriction}
+                              <li key={idx} className="text-[10px] font-bold text-slate-500 flex items-start gap-1.5">
+                                <span className="text-rose-500 font-black">×</span> {restriction}
                               </li>
                             ))}
                           </ul>
                         </div>
                       </div>
                     </div>
-                  </div>
-                )
-              }}
-            </form.Subscribe>
+                  );
+                }}
+              </form.Subscribe>
+            </div>
 
-            {/* Footer Actions */}
-            <div className="pt-6 border-t border-slate-200">
+            {/* Footer Form Action */}
+            <div className="pt-4 border-t border-slate-200/80 mt-4">
               <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
                 {([canSubmit, isSubmitting]) => (
-                  <button type="submit" form="provisioning-form" disabled={!canSubmit || isSubmitting as boolean || mutation.isPending} className="w-full flex items-center justify-center gap-2 bg-emerald-600 text-white px-6 py-3.5 rounded-xl font-black uppercase text-xs tracking-widest hover:bg-emerald-700 transition-all shadow-sm disabled:opacity-50">
-                    {(isSubmitting || mutation.isPending) ? <Loader2 size={16} className="animate-spin" /> : (isEditing ? <><Save size={16} /> Save Changes</> : <><UserPlus size={16} /> Provision Account</>)}
+                  <button 
+                    type="submit" 
+                    form="provisioning-form" 
+                    disabled={!canSubmit || isSubmitting as boolean || mutation.isPending} 
+                    className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-5 py-3 rounded-xl font-black uppercase text-xs tracking-widest transition-all shadow-md active:scale-95"
+                  >
+                    {(isSubmitting || mutation.isPending) ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : isEditing ? (
+                      <><Save size={14} className="text-emerald-400" /> Save Profile</>
+                    ) : (
+                      <><UserPlus size={14} className="text-emerald-400" /> Provision Account</>
+                    )}
                   </button>
                 )}
               </form.Subscribe>
@@ -530,3 +713,5 @@ function UnifiedUserModal({ existingUser, onClose }: { existingUser?: any, onClo
     </div>
   );
 }
+
+export default AccessControlPage;
