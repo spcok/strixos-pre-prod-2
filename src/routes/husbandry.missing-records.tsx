@@ -1,19 +1,71 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
-import { useReactTable, getCoreRowModel, flexRender, ColumnDef, getSortedRowModel, getFilteredRowModel, SortingState } from '@tanstack/react-table';
-import { AlertTriangle, Calendar, ChevronLeft, ChevronRight, Loader2, Search, ArrowUpDown, Plus, ShieldAlert } from 'lucide-react';
-import { format, subDays, startOfDay, endOfDay, isSameDay } from 'date-fns';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { 
+  AlertTriangle, CheckCircle2, Calendar, Search, 
+  Utensils, Scale, Eye, HeartPulse, 
+  Download, Loader2, ArrowRight, WifiOff 
+} from 'lucide-react';
+import { format, parseISO } from 'date-fns';
+import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
-import { Animal } from '../types';
+import { useAuth } from '../lib/auth';
+import { reportExportService } from '../services/reportExportService';
 
-import { FeedModal } from '../components/husbandry/FeedModal';
-import { WeightModal } from '../components/husbandry/WeightModal';
-import { TemperatureModal } from '../components/husbandry/TemperatureModal';
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const missingRecordsDataOptions = queryOptions({
+  queryKey: ['missing_records_pool'],
+  queryFn: async () => {
+    const [animalsRes, logsRes, schedulesRes, prescriptionsRes] = await Promise.all([
+      supabase
+        .from('animals')
+        .select('*')
+        .neq('status', 'ARCHIVED')
+        .neq('status', 'DECEASED')
+        .order('name', { ascending: true }),
+      supabase
+        .from('daily_logs')
+        .select('*')
+        .order('log_date', { ascending: false }),
+      supabase
+        .from('feeding_schedules')
+        .select('*')
+        .eq('is_deleted', false),
+      supabase
+        .from('prescriptions')
+        .select('*')
+        .eq('status', 'ACTIVE')
+    ]);
 
-export const Route = createFileRoute('/staff/missing-records')({
-  component: MissingHusbandryRecords,
+    if (animalsRes.error) throw animalsRes.error;
+
+    return {
+      animals: animalsRes.data || [],
+      logs: logsRes.data || [],
+      schedules: schedulesRes.data || [],
+      prescriptions: prescriptionsRes.data || []
+    };
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
 });
+
+// @ts-ignore
+export const Route = createFileRoute('/husbandry/missing-records')({
+  loader: async ({ context }: any) => {
+    if (context?.queryClient) {
+      await context.queryClient.ensureQueryData(missingRecordsDataOptions);
+    }
+  },
+  component: MissingRecordsPage,
+});
+
+const CATEGORY_TABS = ['ALL', 'OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'] as const;
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
@@ -26,415 +78,527 @@ function useIsMobile() {
   return isMobile;
 }
 
-const getLocalDateString = (d = new Date()) => {
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-};
-
-const getSafeISOStart = (dateString: string) => new Date(`${dateString}T00:00:00`).toISOString();
-const getSafeISOEnd = (dateString: string) => new Date(`${dateString}T23:59:59.999`).toISOString();
-
-// ------------------------------------------------------------------
-// COMPLIANCE ENGINE
-// ------------------------------------------------------------------
-// This defines what constitutes a "missing" record for your facility.
-const COMPLIANCE_RULES = {
-  WEIGHT_CADENCE_DAYS: 7, // Flag if not weighed in 7 days
-  REQUIRES_DAILY_TEMP: ['EXOTIC', 'AQUATIC', 'INVERT'], // Categories needing daily temps
-};
-
-function MissingHusbandryRecords() {
-  const isMobile = useIsMobile();
+export function MissingRecordsPage() {
   const queryClient = useQueryClient();
-  
-  // DATE STATE
-  const [activeDate, setActiveDate] = useState<string>(getLocalDateString());
-  const [inputDate, setInputDate] = useState<string>(getLocalDateString());
-  
-  // FILTERS
-  const [activeTab, setActiveTab] = useState('ALL');
-  const [globalFilter, setGlobalFilter] = useState('');
-  const [sorting, setSorting] = useState<SortingState>([]);
-  
-  // MODALS
-  const [feedModalState, setFeedModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
-  const [weightModalState, setWeightModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
-  const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null }>({ isOpen: false, animal: null });
+  const { profile, user } = useAuth();
+  const isMobile = useIsMobile();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+
+  const [selectedDate, setSelectedDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
+  const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [filterType, setFilterType] = useState<'ALL' | 'OBSERVATION' | 'FEEDING' | 'WEIGHT' | 'MEDICATION'>('ALL');
+  const [isExporting, setIsExporting] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Supabase Realtime Listener
+  useEffect(() => {
+    if (!isOnline) return;
+    const channel = supabase
+      .channel('missing-records-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_logs' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['missing_records_pool'] });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isOnline, queryClient]);
+
+  const { data: db, isLoading } = useQuery(missingRecordsDataOptions);
 
   // ------------------------------------------------------------------
-  // DATA FETCHING
+  // AUDIT ENGINE
   // ------------------------------------------------------------------
-  const { data: animals = [], isLoading: loadingAnimals } = useQuery({
-    queryKey: ['animals', 'compliance'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('animals').select('*').neq('status', 'ARCHIVED').order('name');
-      if (error) throw error;
-      return data as Animal[];
-    },
-    meta: { persist: true }
-  });
+  const auditedAnimals = useMemo(() => {
+    if (!db) return [];
 
-  // Fetch feeds for the selected day
-  const { data: dayFeeds = [], isLoading: loadingFeeds } = useQuery({
-    queryKey: ['feed_logs', 'compliance', activeDate],
-    queryFn: async () => {
-      const start = getSafeISOStart(activeDate);
-      const end = getSafeISOEnd(activeDate);
-      const { data, error } = await supabase.from('feed_logs').select('animal_id').gte('recorded_at', start).lte('recorded_at', end);
-      if (error) throw error;
-      return data;
-    },
-    placeholderData: keepPreviousData,
-    meta: { persist: true }
-  });
+    const targetDateStr = selectedDate;
+    const targetDateObj = parseISO(targetDateStr);
 
-  // Fetch temps for the selected day
-  const { data: dayTemps = [], isLoading: loadingTemps } = useQuery({
-    queryKey: ['temperature_logs', 'compliance', activeDate],
-    queryFn: async () => {
-      const start = getSafeISOStart(activeDate);
-      const end = getSafeISOEnd(activeDate);
-      const { data, error } = await supabase.from('temperature_logs').select('animal_id').gte('recorded_at', start).lte('recorded_at', end);
-      if (error) throw error;
-      return data;
-    },
-    placeholderData: keepPreviousData,
-    meta: { persist: true }
-  });
+    return db.animals.map((animal: any) => {
+      // 1. Observation Logs
+      const logsForDay = db.logs.filter((l: any) => {
+        if (l.animal_id !== animal.id) return false;
+        const logDate = l.log_date ? l.log_date.split('T')[0] : '';
+        return logDate === targetDateStr;
+      });
 
-  // Fetch weights for the last X days to check compliance cadence
-  const { data: recentWeights = [], isLoading: loadingWeights } = useQuery({
-    queryKey: ['weight_logs', 'compliance', activeDate],
-    queryFn: async () => {
-      const targetDate = new Date(`${activeDate}T12:00:00`);
-      const cutoffDate = subDays(targetDate, COMPLIANCE_RULES.WEIGHT_CADENCE_DAYS);
-      const { data, error } = await supabase.from('weight_logs').select('animal_id').gte('recorded_at', cutoffDate.toISOString()).lte('recorded_at', getSafeISOEnd(activeDate));
-      if (error) throw error;
-      return data;
-    },
-    placeholderData: keepPreviousData,
-    meta: { persist: true }
-  });
+      const hasObservation = logsForDay.some((l: any) => l.log_type === 'OBSERVATION');
 
-  const isLoading = loadingAnimals || loadingFeeds || loadingTemps || loadingWeights;
+      // 2. Feeding Logs
+      const hasFeedLog = logsForDay.some((l: any) => l.log_type === 'FEEDING');
+      const scheduledFeeds = db.schedules.filter(
+        (s: any) => s.animal_id === animal.id && s.scheduled_date === targetDateStr
+      );
+      const isFastingDay = scheduledFeeds.some(
+        (s: any) => s.notes === 'FAST DAY / NOT REQUIRED' || s.food_type === 'NOT REQUIRED'
+      );
+      const isFeedRequired = scheduledFeeds.length > 0 && !isFastingDay;
+      const missingFeed = isFeedRequired && !hasFeedLog;
 
-  const updateDate = (newDate: string) => {
-    if (newDate && newDate.length === 10) {
-      setActiveDate(newDate);
-      setInputDate(newDate);
-    } else {
-      setInputDate(activeDate);
-    }
-  };
+      // 3. Weight Logs (7-day window)
+      const recentWeightLogs = db.logs.filter((l: any) => {
+        if (l.animal_id !== animal.id || l.log_type !== 'WEIGHT' || !l.log_date) return false;
+        const logTime = new Date(l.log_date).getTime();
+        const targetTime = targetDateObj.getTime();
+        const diffDays = Math.abs((targetTime - logTime) / (1000 * 60 * 60 * 24));
+        return diffDays <= 7;
+      });
+      const missingWeight = recentWeightLogs.length === 0;
 
-  const shiftDate = (days: number) => {
-    const parts = activeDate.split('-');
-    if (parts.length !== 3) return;
-    const [y, m, d] = parts.map(Number);
-    const dateObj = new Date(y, m - 1, d, 12, 0, 0);
-    dateObj.setDate(dateObj.getDate() + days);
-    updateDate(getLocalDateString(dateObj));
-  };
+      // 4. Prescriptions
+      const activeMeds = db.prescriptions.filter((p: any) => p.animal_id === animal.id);
+      const hasMedLog = logsForDay.some((l: any) => l.log_type === 'MEDICATION' || l.log_type === 'CLINICAL');
+      const missingMed = activeMeds.length > 0 && !hasMedLog;
 
-  // ------------------------------------------------------------------
-  // AUDIT ENGINE LOGIC
-  // ------------------------------------------------------------------
-  const complianceData = useMemo(() => {
-    // 1. Create Sets for fast O(1) lookups
-    const fedAnimalIds = new Set(dayFeeds.map(f => f.animal_id));
-    const tempedAnimalIds = new Set(dayTemps.map(t => t.animal_id));
-    const weighedAnimalIds = new Set(recentWeights.map(w => w.animal_id));
-
-    // 2. Map through animals and identify gaps
-    let auditList = animals.map(animal => {
-      const gaps = [];
-
-      // Check Feed Gap (Assuming all animals need daily feeds. Can add logic later if snakes fast, etc.)
-      if (!fedAnimalIds.has(animal.id)) gaps.push('FEED');
-
-      // Check Temp Gap (Only for specific categories)
-      if (animal.category && COMPLIANCE_RULES.REQUIRES_DAILY_TEMP.includes(animal.category)) {
-        if (!animal.ambient_temp_only && !tempedAnimalIds.has(animal.id)) {
-           gaps.push('TEMP');
-        }
-      }
-
-      // Check Weight Gap (Hasn't been weighed in the compliance window)
-      if (!weighedAnimalIds.has(animal.id)) gaps.push('WEIGHT');
+      const missingCount =
+        (!hasObservation ? 1 : 0) +
+        (missingFeed ? 1 : 0) +
+        (missingWeight ? 1 : 0) +
+        (missingMed ? 1 : 0);
 
       return {
         ...animal,
-        gaps,
-        isCompliant: gaps.length === 0
+        hasObservation,
+        missingObservation: !hasObservation,
+        hasFeedLog,
+        isFeedRequired,
+        isFastingDay,
+        missingFeed,
+        missingWeight,
+        activeMedsCount: activeMeds.length,
+        missingMed,
+        missingCount,
+        isFullyCompliant: missingCount === 0
       };
     });
+  }, [db, selectedDate]);
 
-    // 3. Filter out compliant animals (We only want to see problems on this screen)
-    let nonCompliantList = auditList.filter(a => !a.isCompliant);
+  // Filtered List
+  const filteredList = useMemo(() => {
+    return auditedAnimals.filter((animal: any) => {
+      const inCategory = selectedCategory === 'ALL' || animal.category === selectedCategory;
 
-    // 4. Apply UI Filters
-    if (activeTab !== 'ALL') {
-      nonCompliantList = nonCompliantList.filter(a => a.category === activeTab);
-    }
+      const matchesSearch =
+        !searchQuery.trim() ||
+        animal.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        animal.species?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        animal.ring_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        animal.enclosure?.toLowerCase().includes(searchQuery.toLowerCase());
 
-    if (globalFilter) {
-      const q = globalFilter.toLowerCase();
-      nonCompliantList = nonCompliantList.filter(a => 
-        a.name.toLowerCase().includes(q) || 
-        (a.species && a.species.toLowerCase().includes(q)) ||
-        (a.ring_number && a.ring_number.toLowerCase().includes(q))
-      );
-    }
+      let matchesType = true;
+      if (filterType === 'OBSERVATION') matchesType = animal.missingObservation;
+      if (filterType === 'FEEDING') matchesType = animal.missingFeed;
+      if (filterType === 'WEIGHT') matchesType = animal.missingWeight;
+      if (filterType === 'MEDICATION') matchesType = animal.missingMed;
 
-    return nonCompliantList;
-  }, [animals, dayFeeds, dayTemps, recentWeights, activeTab, globalFilter]);
+      return inCategory && matchesSearch && matchesType && animal.missingCount > 0;
+    });
+  }, [auditedAnimals, selectedCategory, searchQuery, filterType]);
 
-  const categories = useMemo(() => Array.from(new Set(animals.map(a => a.category).filter(Boolean))).sort(), [animals]);
-  const tabs = ['ALL', ...categories];
+  // Stats Breakdown
+  const stats = useMemo(() => {
+    const totalAnimals = auditedAnimals.length;
+    const compliantAnimals = auditedAnimals.filter((a: any) => a.isFullyCompliant).length;
+    const missingObservations = auditedAnimals.filter((a: any) => a.missingObservation).length;
+    const missingFeeds = auditedAnimals.filter((a: any) => a.missingFeed).length;
+    const missingWeights = auditedAnimals.filter((a: any) => a.missingWeight).length;
+    const missingMeds = auditedAnimals.filter((a: any) => a.missingMed).length;
 
-  // ------------------------------------------------------------------
-  // TABLE COLUMNS
-  // ------------------------------------------------------------------
-  const columns = useMemo<ColumnDef<any>[]>(() => [
-    {
-      accessorKey: 'name',
-      header: 'Animal Details',
-      cell: (info) => {
-        const animal = info.row.original;
-        return (
-          <div className="flex flex-col justify-center min-w-0 py-1">
-            <h3 className="font-bold text-slate-900 text-xs lg:text-sm tracking-tight truncate" title={animal.name}>{animal.name}</h3>
-            <div className="flex items-center gap-1.5 text-[9px] lg:text-[10px] text-slate-500 truncate mt-0.5">
-              {animal.ring_number && <span className="font-bold text-slate-400 uppercase tracking-widest">{animal.ring_number}</span>}
-              {animal.ring_number && animal.species && <span>•</span>}
-              {animal.species && <span className="italic truncate">{animal.species}</span>}
-            </div>
-          </div>
-        );
-      }
-    },
-    {
-      id: 'missing_feed',
-      header: 'Feed Status',
-      cell: (info) => {
-        const hasGap = info.row.original.gaps.includes('FEED');
-        if (!hasGap) return <div className="text-[10px] font-bold text-slate-300 uppercase tracking-widest text-center">Logged</div>;
-        return (
-          <button onClick={() => setFeedModalState({ isOpen: true, animalId: info.row.original.id })} className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl hover:bg-amber-100 transition-colors shadow-sm">
-            <AlertTriangle size={14} /> <span className="text-[10px] font-black uppercase tracking-widest">Missing</span>
-          </button>
-        );
-      }
-    },
-    {
-      id: 'missing_weight',
-      header: `${COMPLIANCE_RULES.WEIGHT_CADENCE_DAYS}-Day Weight`,
-      cell: (info) => {
-        const hasGap = info.row.original.gaps.includes('WEIGHT');
-        if (!hasGap) return <div className="text-[10px] font-bold text-slate-300 uppercase tracking-widest text-center">Compliant</div>;
-        return (
-          <button onClick={() => setWeightModalState({ isOpen: true, animalId: info.row.original.id })} className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl hover:bg-rose-100 transition-colors shadow-sm">
-            <AlertTriangle size={14} /> <span className="text-[10px] font-black uppercase tracking-widest">Overdue</span>
-          </button>
-        );
-      }
-    },
-    {
-      id: 'missing_temp',
-      header: 'Temp Status',
-      cell: (info) => {
-        const animal = info.row.original;
-        const requiresTemp = animal.category && COMPLIANCE_RULES.REQUIRES_DAILY_TEMP.includes(animal.category) && !animal.ambient_temp_only;
-        if (!requiresTemp) return <div className="text-[10px] font-bold text-slate-200 uppercase tracking-widest text-center">N/A</div>;
-        
-        const hasGap = animal.gaps.includes('TEMP');
-        if (!hasGap) return <div className="text-[10px] font-bold text-slate-300 uppercase tracking-widest text-center">Logged</div>;
-        
-        return (
-          <button onClick={() => setTempModalState({ isOpen: true, animal: animal })} className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl hover:bg-blue-100 transition-colors shadow-sm">
-            <AlertTriangle size={14} /> <span className="text-[10px] font-black uppercase tracking-widest">Missing</span>
-          </button>
-        );
-      }
-    }
-  ], []); 
+    const compliancePercent = totalAnimals > 0 ? Math.round((compliantAnimals / totalAnimals) * 100) : 100;
 
-  const table = useReactTable({
-    data: complianceData,
-    columns,
-    state: { globalFilter, sorting },
-    onGlobalFilterChange: setGlobalFilter,
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
+    return {
+      totalAnimals,
+      compliantAnimals,
+      missingObservations,
+      missingFeeds,
+      missingWeights,
+      missingMeds,
+      compliancePercent
+    };
+  }, [auditedAnimals]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredList.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => (isMobile ? 190 : 72),
+    overscan: 5,
   });
 
-  const tableGridCols = "minmax(180px, 2fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(130px, 1fr)";
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const tableGridCols = "minmax(220px, 1.6fr) minmax(130px, 0.9fr) minmax(280px, 2fr) minmax(130px, 0.9fr)";
+
+  const handleExportAudit = async () => {
+    if (!isOnline) {
+      toast.error('Exporting compliance reports requires an active network connection.');
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      const headers = ['Animal Name', 'Species', 'Category', 'Enclosure', 'Missing Protocols'];
+      const exportRows = filteredList.map((a: any) => {
+        const issues = [];
+        if (a.missingObservation) issues.push('Daily Observation');
+        if (a.missingFeed) issues.push('Scheduled Feed');
+        if (a.missingWeight) issues.push('Weekly Weight Record');
+        if (a.missingMed) issues.push('Active Medication Administration');
+
+        return [
+          a.name,
+          a.species || '-',
+          a.category || '-',
+          a.enclosure || '-',
+          issues.join(', ') || 'Fully Compliant'
+        ];
+      });
+
+      await reportExportService.exportSingleReport(
+        {
+          title: `Husbandry Non-Compliance Audit - ${format(parseISO(selectedDate), 'dd MMM yyyy')}`,
+          dateRange: `Audit Date: ${format(parseISO(selectedDate), 'dd MMM yyyy')}`,
+          generatorName: profile?.name || user?.email || 'Compliance Officer',
+          columns: headers,
+          data: exportRows
+        },
+        'missing_records_audit'
+      );
+      toast.success('Audit report exported successfully.');
+    } catch (err: any) {
+      toast.error(`Export failed: ${err.message || 'Error compiling audit document'}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 font-sans">
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4 animate-in fade-in duration-300 w-full font-sans">
       
-      {/* HEADER */}
-      <div className="flex justify-between items-center w-full portrait:flex landscape:hidden lg:landscape:flex">
-        <div className="shrink-0 pr-4">
-           <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-             Compliance Audit
-           </h1>
+      {/* HEADER RIBBON */}
+      <div className="flex justify-between items-start w-full mb-1 shrink-0">
+        <div className="shrink-0 pr-4 flex flex-col gap-1">
+          <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-none flex items-center gap-2.5">
+            <AlertTriangle className="text-amber-600" size={22} />
+            Missing Records & Non-Compliance Audit
+          </h1>
+          <p className="text-[10px] lg:text-xs text-slate-500 font-bold uppercase tracking-widest">
+            Statutory Zoo Licensing Act (ZLA) Daily Protocol & Observation Verification
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {!isOnline && (
+            <span className="text-[10px] font-bold text-amber-600 flex items-center gap-1 bg-amber-50 px-2.5 py-1 rounded-xl border border-amber-200">
+              <WifiOff size={12} /> Offline
+            </span>
+          )}
+          <button
+            onClick={handleExportAudit}
+            disabled={isExporting || isLoading || filteredList.length === 0}
+            className="flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95 shrink-0"
+          >
+            {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="text-emerald-400" />}
+            <span>Export Audit .DOCX</span>
+          </button>
         </div>
       </div>
 
-      {/* CONTROLS */}
-      <div className="flex flex-col sm:flex-row gap-2 lg:gap-3 w-full bg-slate-50/80 p-2 lg:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden lg:landscape:flex">
-        
-        <div className="relative w-full lg:w-96 shrink-0">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-          <input 
-            type="text" 
-            placeholder="Filter non-compliant animals..." 
-            value={globalFilter ?? ''}
-            onChange={(e) => setGlobalFilter(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs lg:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-all shadow-sm placeholder:text-slate-400"
-          />
+      {/* STATS OVERVIEW CARDS */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 shrink-0">
+        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Daily Compliance</span>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className={`text-2xl font-black ${stats.compliancePercent >= 90 ? 'text-emerald-600' : stats.compliancePercent >= 70 ? 'text-amber-600' : 'text-rose-600'}`}>
+              {stats.compliancePercent}%
+            </span>
+            <span className="text-[10px] font-bold text-slate-400">
+              {stats.compliantAnimals}/{stats.totalAnimals}
+            </span>
+          </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 w-full lg:w-auto">
-          {activeDate !== getLocalDateString() && (
-            <button 
-              onClick={() => updateDate(getLocalDateString())} 
-              className="flex items-center gap-1.5 px-3 py-2 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-xl text-[10px] lg:text-xs font-black uppercase tracking-widest transition-colors shadow-sm border border-rose-200 shrink-0"
-            >
-              <Calendar size={14} /> Today
-            </button>
-          )}
-          <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full lg:w-auto min-w-0">
-            <button onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95 shrink-0"><ChevronLeft size={16} /></button>
-            <div className="flex-1 lg:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[130px]">
-              <input 
-                type="date" 
-                value={inputDate}
-                onChange={(e) => setInputDate(e.target.value)}
-                onBlur={(e) => updateDate(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && updateDate(e.currentTarget.value)}
-                className="bg-transparent border-none text-[10px] lg:text-xs font-bold text-slate-700 focus:outline-none focus:ring-0 py-1 cursor-pointer w-full text-center"
-              />
-            </div>
-            <button onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95 shrink-0"><ChevronRight size={16} /></button>
+        <div 
+          onClick={() => setFilterType(filterType === 'OBSERVATION' ? 'ALL' : 'OBSERVATION')}
+          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
+            filterType === 'OBSERVATION' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'OBSERVATION' ? 'text-slate-300' : 'text-slate-400'}`}>
+              Observations
+            </span>
+            <Eye size={13} className={filterType === 'OBSERVATION' ? 'text-emerald-400' : 'text-slate-400'} />
+          </div>
+          <p className="text-xl font-black mt-2">{stats.missingObservations}</p>
+        </div>
+
+        <div 
+          onClick={() => setFilterType(filterType === 'FEEDING' ? 'ALL' : 'FEEDING')}
+          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
+            filterType === 'FEEDING' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'FEEDING' ? 'text-slate-300' : 'text-slate-400'}`}>
+              Feed Logs
+            </span>
+            <Utensils size={13} className={filterType === 'FEEDING' ? 'text-amber-400' : 'text-slate-400'} />
+          </div>
+          <p className="text-xl font-black mt-2">{stats.missingFeeds}</p>
+        </div>
+
+        <div 
+          onClick={() => setFilterType(filterType === 'WEIGHT' ? 'ALL' : 'WEIGHT')}
+          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
+            filterType === 'WEIGHT' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'WEIGHT' ? 'text-slate-300' : 'text-slate-400'}`}>
+              7-Day Weights
+            </span>
+            <Scale size={13} className={filterType === 'WEIGHT' ? 'text-blue-400' : 'text-slate-400'} />
+          </div>
+          <p className="text-xl font-black mt-2">{stats.missingWeights}</p>
+        </div>
+
+        <div 
+          onClick={() => setFilterType(filterType === 'MEDICATION' ? 'ALL' : 'MEDICATION')}
+          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
+            filterType === 'MEDICATION' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'MEDICATION' ? 'text-slate-300' : 'text-slate-400'}`}>
+              Clinical MARs
+            </span>
+            <HeartPulse size={13} className={filterType === 'MEDICATION' ? 'text-rose-400' : 'text-slate-400'} />
+          </div>
+          <p className="text-xl font-black mt-2">{stats.missingMeds}</p>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 p-3.5 rounded-2xl shadow-sm flex flex-col justify-between">
+          <span className="text-[9px] font-black uppercase tracking-widest text-amber-800">Total Flagged</span>
+          <div className="mt-2 flex items-baseline gap-1.5">
+            <span className="text-2xl font-black text-amber-900">{filteredList.length}</span>
+            <span className="text-[10px] font-bold text-amber-700">Animals</span>
           </div>
         </div>
       </div>
 
-      {/* CATEGORY TABS */}
-      <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full shrink-0 gap-1.5">
-        {tabs.map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm ${
-              activeTab === tab 
-                ? 'bg-rose-600 text-white border border-rose-700 shadow-rose-600/20'
-                : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
+      {/* FILTER & DATE CONTROLS */}
+      <div className="bg-slate-50/90 p-3 rounded-2xl border border-slate-200 shadow-inner flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+          <div className="flex items-center bg-white rounded-xl px-3 py-1.5 border border-slate-200 shadow-sm gap-2">
+            <Calendar size={13} className="text-slate-400 shrink-0" />
+            <input
+              type="date"
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="bg-transparent text-xs font-bold text-slate-800 border-none outline-none cursor-pointer p-0"
+            />
+          </div>
 
-      {/* MAIN DATA GRID */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative mt-1">
-        
-        {/* SUMMARY BAR */}
-        <div className="px-5 py-3 border-b border-slate-100 bg-rose-50/50 flex items-center justify-between shrink-0">
-          <span className="text-xs font-bold text-rose-800">
-            {isLoading ? 'Scanning records...' : `${complianceData.length} records require attention`}
-          </span>
-          <span className="text-[10px] font-black uppercase tracking-widest text-rose-400">
-            Audit Date: {format(new Date(`${activeDate}T12:00:00`), 'dd MMM yyyy')}
-          </span>
+          <div className="flex gap-1 overflow-x-auto custom-scrollbar">
+            {CATEGORY_TABS.map((cat) => (
+              <button
+                key={cat}
+                onClick={() => setSelectedCategory(cat)}
+                className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm ${
+                  selectedCategory === cat
+                    ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+                    : 'bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-700 border border-slate-200'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
         </div>
 
+        <div className="relative w-full sm:w-64">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-3.5 h-3.5" />
+          <input
+            type="text"
+            placeholder="Search name, ring, enclosure..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl font-medium focus:ring-2 focus:ring-slate-900 outline-none shadow-sm"
+          />
+        </div>
+      </div>
+
+      {/* AUDIT RESULTS GRID */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative">
         {isLoading && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-20 flex items-center justify-center rounded-2xl">
             <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center gap-3 border border-slate-100">
-              <Loader2 className="animate-spin text-rose-600" size={24} />
-              <span className="text-sm font-bold text-slate-700">Running compliance engine...</span>
+              <Loader2 className="animate-spin text-slate-600" size={24} />
+              <span className="text-sm font-bold text-slate-700">Auditing Statutory Husbandry Records...</span>
             </div>
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar bg-slate-50/30">
-          
-          <div className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-20 backdrop-blur-md" style={{ gridTemplateColumns: tableGridCols }}>
-            {table.getHeaderGroups().map(headerGroup => (
-              <React.Fragment key={headerGroup.id}>
-                {headerGroup.headers.map((header, index) => (
-                  <div 
-                    key={header.id} 
-                    className={`px-5 py-4 flex items-center gap-2 cursor-pointer hover:bg-slate-200/50 transition-colors ${
-                      index === 0 ? 'justify-start text-left' : 'justify-center text-center'
-                    }`} 
-                    onClick={header.column.getToggleSortingHandler()}
-                  >
-                    {flexRender(header.column.columnDef.header, header.getContext())}
-                    {{ asc: <ArrowUpDown size={12} className="text-rose-500" />, desc: <ArrowUpDown size={12} className="text-rose-500 rotate-180" /> }[header.column.getIsSorted() as string] ?? null}
-                  </div>
-                ))}
-              </React.Fragment>
-            ))}
+        <div ref={scrollParentRef} className="flex-1 overflow-y-auto custom-scrollbar bg-slate-50/30">
+          <div 
+            className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-10 backdrop-blur-md min-w-[800px]"
+            style={{ gridTemplateColumns: tableGridCols }}
+          >
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Animal & Species</div>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Enclosure</div>
+            <div className="px-5 py-3.5 flex items-center justify-start text-left">Outstanding Protocols</div>
+            <div className="px-5 py-3.5 flex items-center justify-end text-right">Direct Action</div>
           </div>
 
-          <div className="p-3 lg:p-0">
-            {table.getRowModel().rows.length === 0 && !isLoading ? (
-              <div className="p-8 lg:p-12 text-center text-emerald-600 flex flex-col items-center">
-                <div className="w-16 h-16 bg-emerald-50 rounded-2xl flex items-center justify-center mb-4 border border-emerald-200 shadow-sm">
-                  <ShieldAlert size={32} className="text-emerald-500" />
-                </div>
-                <p className="text-lg font-black tracking-tight mb-1">100% Compliant</p>
-                <p className="text-xs font-bold opacity-80">No missing records found for this date.</p>
+          {filteredList.length === 0 && !isLoading ? (
+            <div className="p-12 text-center text-slate-500 flex flex-col items-center justify-center h-full">
+              <div className="w-14 h-14 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-center mb-3 shadow-sm">
+                <CheckCircle2 size={28} className="text-emerald-600" />
               </div>
-            ) : (
-              <div className="space-y-3 lg:space-y-0 lg:divide-y lg:divide-slate-100">
-                {table.getRowModel().rows.map(row => (
-                  <div 
-                    key={row.id} 
-                    className="grid grid-cols-1 lg:grid border border-rose-100 lg:border-none rounded-xl lg:rounded-none bg-white p-3 lg:p-0 hover:bg-slate-50 transition-colors shadow-sm lg:shadow-none gap-2 lg:gap-0"
-                    style={{ gridTemplateColumns: isMobile ? '1fr' : tableGridCols }}
+              <h3 className="font-black text-slate-900 uppercase tracking-tight text-sm">Full Protocol Compliance</h3>
+              <p className="text-xs font-medium text-slate-500 mt-1 max-w-sm">
+                All daily observations, scheduled feeds, and active medical logs for this date have been logged in accordance with ZLA standards.
+              </p>
+            </div>
+          ) : (
+            <div 
+              className="p-3 lg:p-0 min-w-full lg:min-w-[800px]"
+              style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: 'relative' }}
+            >
+              {virtualItems.map((virtualRow) => {
+                const animal = filteredList[virtualRow.index];
+
+                return (
+                  <div
+                    key={animal.id}
+                    ref={rowVirtualizer.measureElement}
+                    data-index={virtualRow.index}
+                    className="absolute top-0 left-0 w-full transition-colors box-border"
+                    style={{ transform: `translateY(${virtualRow.start}px)` }}
                   >
-                    {row.getVisibleCells().map((cell, index) => (
-                      <div 
-                        key={cell.id} 
-                        className={`w-full lg:px-5 lg:py-3 flex min-w-0 ${isMobile ? 'flex-col' : 'items-center justify-center'}`}
-                      >
-                        {isMobile && index !== 0 && (
-                          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1 text-center w-full">
-                            {flexRender(cell.column.columnDef.header, cell.getContext())}
+                    {/* Mobile / Tablet Card */}
+                    <div className="lg:hidden p-1.5">
+                      <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                          <div>
+                            <h4 className="font-black text-slate-900 text-sm">{animal.name}</h4>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{animal.species}</p>
                           </div>
-                        )}
-                        <div className={`w-full ${index !== 0 && !isMobile ? 'flex justify-center' : ''}`}>
-                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          <span className="px-2.5 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-slate-100 text-slate-700 border border-slate-200">
+                            {animal.enclosure || 'No Enclosure'}
+                          </span>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block">Missing Requirements:</span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {animal.missingObservation && (
+                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
+                                <Eye size={11} /> Observation Log
+                              </span>
+                            )}
+                            {animal.missingFeed && (
+                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
+                                <Utensils size={11} /> Scheduled Feed
+                              </span>
+                            )}
+                            {animal.missingWeight && (
+                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                                <Scale size={11} /> Weekly Weight
+                              </span>
+                            )}
+                            {animal.missingMed && (
+                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
+                                <HeartPulse size={11} /> Active Medication
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="pt-2 border-t border-slate-100 flex justify-end">
+                          <Link
+                            to={'/husbandry/daily-logs' as any}
+                            search={{ animalId: animal.id } as any}
+                            className="text-xs font-black uppercase tracking-widest text-slate-900 hover:text-slate-700 flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-xl transition-all"
+                          >
+                            <span>Log Protocols</span>
+                            <ArrowRight size={13} />
+                          </Link>
                         </div>
                       </div>
-                    ))}
+                    </div>
+
+                    {/* Desktop Row */}
+                    <div 
+                      className="hidden lg:grid border-b border-slate-100 bg-white hover:bg-slate-50/80 transition-colors"
+                      style={{ gridTemplateColumns: tableGridCols }}
+                    >
+                      <div className="px-5 py-3.5 flex flex-col justify-center min-w-0">
+                        <h4 className="text-xs font-bold text-slate-900 truncate">{animal.name}</h4>
+                        <p className="text-[10px] text-slate-400 font-medium truncate">{animal.species}</p>
+                      </div>
+
+                      <div className="px-5 py-3.5 flex items-center justify-start min-w-0">
+                        <span className="text-xs font-bold text-slate-700">{animal.enclosure || '-'}</span>
+                      </div>
+
+                      <div className="px-5 py-3.5 flex items-center gap-1.5 flex-wrap min-w-0">
+                        {animal.missingObservation && (
+                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
+                            <Eye size={10} /> Observation
+                          </span>
+                        )}
+                        {animal.missingFeed && (
+                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
+                            <Utensils size={10} /> Feed Log
+                          </span>
+                        )}
+                        {animal.missingWeight && (
+                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                            <Scale size={10} /> Weight (7d)
+                          </span>
+                        )}
+                        {animal.missingMed && (
+                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
+                            <HeartPulse size={10} /> Medical MAR
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="px-5 py-3.5 flex items-center justify-end min-w-0">
+                        <Link
+                          to={'/husbandry/daily-logs' as any}
+                          search={{ animalId: animal.id } as any}
+                          className="text-[10px] font-black uppercase tracking-widest text-slate-900 hover:text-white hover:bg-slate-900 border border-slate-200 px-3 py-1.5 rounded-xl transition-all shadow-sm flex items-center gap-1"
+                        >
+                          <span>Log Now</span>
+                          <ArrowRight size={12} />
+                        </Link>
+                      </div>
+                    </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* RESOLUTION MODALS */}
-      {feedModalState.isOpen && feedModalState.animalId && (
-        <FeedModal isOpen={feedModalState.isOpen} animalId={feedModalState.animalId} selectedDate={activeDate} onClose={() => setFeedModalState({ isOpen: false, animalId: null })} />
-      )}
-      {weightModalState.isOpen && weightModalState.animalId && (
-        <WeightModal isOpen={weightModalState.isOpen} animalId={weightModalState.animalId} selectedDate={activeDate} onClose={() => setWeightModalState({ isOpen: false, animalId: null })} />
-      )}
-      {tempModalState.isOpen && tempModalState.animal && (
-        <TemperatureModal isOpen={tempModalState.isOpen} animalId={tempModalState.animal.id} ambientOnly={tempModalState.animal.ambient_temp_only || false} selectedDate={activeDate} onClose={() => setTempModalState({ isOpen: false, animal: null })} />
-      )}
     </div>
   );
 }
 
-export default MissingHusbandryRecords;
+export default MissingRecordsPage;

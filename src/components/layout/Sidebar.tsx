@@ -7,13 +7,13 @@ import {
   Wrench, Users, Clock, CalendarHeart, FileBadge, FileWarning, 
   BarChart3, Settings, HelpCircle, ChevronDown, ChevronRight, HeartPulse,
   Utensils, LogOut, MapPin, ArrowRightLeft, ListTree, UserCog, Building2,
-  Ticket, QrCode, Skull
+  Ticket, QrCode, Skull, Maximize, Minimize
 } from 'lucide-react';
 
 // IMPORT YOUR TRANSPARENT LOGO HERE
 import logoImg from '../../assets/logo.png';
 
-// --- NEW ARCHITECTURE HOOKS (Only Logic, No UI Changes) ---
+// --- ARCHITECTURE HOOKS ---
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
@@ -52,8 +52,8 @@ interface NavItem {
 interface NavGroupData {
   title: string;
   icon: React.ElementType;
-  requireDesktop?: boolean; // NEW FLAG
-  requireOnline?: boolean;  // NEW FLAG
+  requireDesktop?: boolean;
+  requireOnline?: boolean;
   items: NavItem[];
 }
 
@@ -62,21 +62,20 @@ const navGroups: NavGroupData[] = [
   {
     title: 'Husbandry',
     icon: Apple,
-    requireDesktop: false, // SAFE FOR IPAD
-    requireOnline: false,  // SAFE FOR OFFLINE
+    requireDesktop: false,
+    requireOnline: false,
     items: [
       { name: 'Daily Logs', to: '/husbandry/daily-logs', icon: ClipboardList, requiredPermission: 'husbandry:read' },
       { name: 'Daily Rounds', to: '/husbandry/rounds', icon: CalendarDays, requiredPermission: 'husbandry:read' },
       { name: 'Feeding Schedule', to: '/husbandry/feeding', icon: Utensils, requiredPermission: 'husbandry:read' },
-      // Path remains the same to not break routing, but display is updated
       { name: 'Compliance Audit', to: '/husbandry/missing-records', icon: ShieldAlert, requiredPermission: 'husbandry:read' },
     ]
   },
   {
     title: 'Clinical',
     icon: Stethoscope,
-    requireDesktop: true, // RESTRICTED
-    requireOnline: true,  // RESTRICTED
+    requireDesktop: true,
+    requireOnline: true,
     items: [
       { name: 'Medical Records', to: '/clinical/records', icon: BriefcaseMedical, requiredPermission: 'clinical:read' },
       { name: 'Medications', to: '/clinical/medications', icon: Syringe, requiredPermission: 'clinical:read' },
@@ -87,8 +86,8 @@ const navGroups: NavGroupData[] = [
   {
     title: 'Logistics',
     icon: ArrowRightLeft,
-    requireDesktop: true, // RESTRICTED
-    requireOnline: true,  // RESTRICTED
+    requireDesktop: true,
+    requireOnline: true,
     items: [
       { name: 'Internal Movements', to: '/logistics/internal-movements', icon: MapPin, requiredPermission: 'logistics:read' },
       { name: 'External Transfers', to: '/logistics/external-transfers', icon: ArrowRightLeft, requiredPermission: 'logistics:read' },
@@ -97,8 +96,8 @@ const navGroups: NavGroupData[] = [
   {
     title: 'Vouchers',
     icon: Ticket,
-    requireDesktop: false, // SAFE FOR IPAD SCANNERS AT THE GATE
-    requireOnline: true,   // REQUIRES DB SYNC FOR VALIDATION
+    requireDesktop: false,
+    requireOnline: true,
     items: [
       { name: 'Voucher Directory', to: '/logistics/vouchers', icon: QrCode, requiredPermission: 'logistics:read' },
     ]
@@ -106,8 +105,8 @@ const navGroups: NavGroupData[] = [
   {
     title: 'Safety & Ops',
     icon: ShieldAlert,
-    requireDesktop: true, // RESTRICTED
-    requireOnline: true,  // RESTRICTED
+    requireDesktop: true,
+    requireOnline: true,
     items: [
       { name: 'Safety Drills', to: '/safety/drills', icon: FileWarning, requiredPermission: 'safety:read' },
       { name: 'Incident Reports', to: '/safety/incidents', icon: AlertTriangle, requiredPermission: 'safety:read' },
@@ -118,33 +117,30 @@ const navGroups: NavGroupData[] = [
   {
     title: 'Staff Hub',
     icon: Users,
-    requireDesktop: true, // RESTRICTED
-    requireOnline: true,  // RESTRICTED
+    requireDesktop: true,
+    requireOnline: true,
     items: [
       { name: 'Staff Rota', to: '/staff/rota', icon: CalendarHeart, requiredPermission: 'hr:read' },
-      { name: 'My Shifts', to: '/staff/shifts', icon: Clock, requiredPermission: 'timesheet:self' }, // FIXED PERMISSION
+      { name: 'My Shifts', to: '/staff/shifts', icon: Clock, requiredPermission: 'timesheet:self' },
       { name: 'Leave Requests', to: '/staff/leave', icon: CalendarDays, requiredPermission: 'hr:read' },
       { name: 'Timesheets', to: '/staff/timesheets', icon: FileBadge, requiredPermission: 'hr:read' },
     ]
   }
 ];
 
-// --- YOUR ORIGINAL NavGroup COMPONENT ---
 function NavGroup({ group, isOpen, showDivider }: { group: NavGroupData, isOpen: boolean, showDivider: boolean }) {
   const [isExpanded, setIsExpanded] = useState(true);
   const location = useLocation();
   const { hasPermission } = useAuth();
-  
-  // NEW LOGIC INJECTED HERE
   const isMobile = useIsMobile();
   const isOnline = useNetworkStatus();
 
-  // 1. Hardware Check (Hide entirely if it requires desktop and we are on mobile)
+  // 1. Hardware Check
   if (group.requireDesktop && isMobile) return null;
-  // 2. Network Check (Hide entirely if it requires online and we are offline)
+  // 2. Network Check
   if (group.requireOnline && !isOnline) return null;
 
-  // 3. RBAC Check (Your original logic)
+  // 3. RBAC Check
   const filteredItems = group.items.filter(item => {
     if (item.requiredPermission && !hasPermission(item.requiredPermission)) return false;
     return true;
@@ -202,13 +198,49 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
   const location = useLocation();
   const isOnline = useNetworkStatus();
   const isMobile = useIsMobile();
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Synchronize fullscreen state across standard and WebKit browsers
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement));
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement && !(document as any).webkitFullscreenElement) {
+        const docEl = document.documentElement as any;
+        if (docEl.requestFullscreen) {
+          await docEl.requestFullscreen();
+        } else if (docEl.webkitRequestFullscreen) {
+          await docEl.webkitRequestFullscreen();
+        }
+      } else {
+        const doc = document as any;
+        if (doc.exitFullscreen) {
+          await doc.exitFullscreen();
+        } else if (doc.webkitExitFullscreen) {
+          await doc.webkitExitFullscreen();
+        }
+      }
+    } catch (err) {
+      console.warn('Fullscreen toggle unavailable on this browser/device:', err);
+    }
+  };
 
   return (
     <aside className={`flex flex-col h-full bg-slate-900 border-r border-slate-800 transition-all duration-300 ${isOpen ? 'w-64' : 'w-20'}`}>
       
-      {/* BRANDING HEADER WITH CUSTOM LOGO */}
+      {/* BRANDING HEADER */}
       <div className={`p-4 flex items-center ${isOpen ? 'justify-start px-5' : 'justify-center'} h-20 shrink-0 border-b border-slate-800/80`}>
-        {/* Increased width and height to w-11 h-11, removed border/bg for seamless PNG integration */}
         <img 
           src={logoImg} 
           alt="StrixOS Logo" 
@@ -224,7 +256,7 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
         )}
       </div>
 
-      {/* Flashing warning when the iPad goes into an enclosure dead zone */}
+      {/* Offline Alert Indicator */}
       {!isOnline && isOpen && (
         <div className="mx-4 mt-4 flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest animate-pulse">
           <ShieldAlert size={14} />
@@ -237,6 +269,7 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
         </div>
       )}
 
+      {/* Navigation List */}
       <nav className="flex-1 overflow-y-auto overflow-x-hidden p-4 custom-scrollbar">
         <Link
           to="/"
@@ -254,19 +287,23 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
 
         <div className="h-px bg-slate-800/50 mx-4 my-4" />
 
-        <Link
-          to="/reports"
-          title={!isOpen ? "Reports" : undefined}
-          className={`flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 mb-2 rounded-xl text-sm font-bold transition-all ${
-            location.pathname === '/reports'
-              ? 'bg-emerald-500/10 text-emerald-400'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-          }`}
-        >
-          <BarChart3 size={18} className="shrink-0" />
-          {isOpen && <span>Reports</span>}
-        </Link>
+        {/* Reports: Desktop Only */}
+        {!isMobile && isOnline && (
+          <Link
+            to="/reports"
+            title={!isOpen ? "Reports" : undefined}
+            className={`flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 mb-2 rounded-xl text-sm font-bold transition-all ${
+              location.pathname === '/reports'
+                ? 'bg-emerald-500/10 text-emerald-400'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+            }`}
+          >
+            <BarChart3 size={18} className="shrink-0" />
+            {isOpen && <span>Reports</span>}
+          </Link>
+        )}
 
+        {/* Settings */}
         {(!isMobile && isOnline) && (
           <Link
             to="/settings"
@@ -283,10 +320,26 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
         )}
       </nav>
 
-      {/* USER PROFILE SECTION */}
-      <div className="p-4 border-t border-slate-800/80 shrink-0">
+      {/* FOOTER & SYSTEM CONTROLS */}
+      <div className="p-4 border-t border-slate-800/80 shrink-0 space-y-1">
+        
+        {/* Fullscreen Toggle Button */}
         <button 
-          className={`w-full flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 mb-4 rounded-xl text-sm font-bold text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors`}
+          onClick={toggleFullscreen}
+          className={`w-full flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 rounded-xl text-sm font-bold text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors group`}
+          title={!isOpen ? (isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen") : undefined}
+        >
+          {isFullscreen ? (
+            <Minimize size={18} className="shrink-0 text-emerald-400" />
+          ) : (
+            <Maximize size={18} className="shrink-0 group-hover:text-slate-300" />
+          )}
+          {isOpen && <span>{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>}
+        </button>
+
+        {/* Help Center Button */}
+        <button 
+          className={`w-full flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 mb-2 rounded-xl text-sm font-bold text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors`}
           title={!isOpen ? "Help Center" : undefined}
         >
           <HelpCircle size={18} className="shrink-0" />
@@ -295,7 +348,7 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
 
         {session && (
           <>
-            <div className={`flex items-center gap-3 mb-4 ${isOpen ? 'px-2' : 'justify-center'}`}>
+            <div className={`flex items-center gap-3 pt-2 mb-3 border-t border-slate-800/60 ${isOpen ? 'px-2' : 'justify-center'}`}>
               <div className="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center text-white font-black text-lg shadow-inner shrink-0">
                 {profile?.name?.charAt(0) || 'U'}
               </div>
@@ -321,3 +374,5 @@ export function Sidebar({ isOpen = true }: { isOpen?: boolean }) {
     </aside>
   );
 }
+
+export default Sidebar;

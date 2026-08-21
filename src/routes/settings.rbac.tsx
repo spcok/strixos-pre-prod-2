@@ -1,87 +1,117 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ShieldCheck, CheckSquare, Square, Loader2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { 
+  ShieldCheck, CheckSquare, Square, Loader2, 
+  Info, Sparkles, ShieldAlert 
+} from 'lucide-react';
+import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
+import { useAuth } from '../lib/auth';
+
+const rbacMatrixOptions = queryOptions({
+  queryKey: ['rbac_matrix'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('rbac_matrix')
+      .select('*');
+    if (error) throw error;
+    return data || [];
+  },
+  staleTime: 1000 * 60 * 15,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
 
 export const Route = createFileRoute('/settings/rbac')({
+  loader: async ({ context }: any) => {
+    if (context?.queryClient) {
+      await context.queryClient.ensureQueryData(rbacMatrixOptions);
+    }
+  },
   component: RBACMatrixPage,
 });
 
-// ------------------------------------------------------------------
-// EXHAUSTIVE SYSTEM PERMISSION REGISTRY (GRANULAR V2)
-// ------------------------------------------------------------------
 const PERMISSION_REGISTRY = [
   {
-    module: 'Husbandry & Care',
+    module: 'Husbandry & Animal Care',
     actions: [
-      { key: 'husbandry:read', label: 'View Daily Logs, Rounds & Diets' },
-      { key: 'husbandry:write', label: 'Submit Daily Logs, Weights & Feeding' },
-      { key: 'animal:manage', label: 'Add/Edit Animal Profiles & Census' },
+      { key: 'husbandry:read', label: 'View Daily Logs, Rounds & Feeding Charts' },
+      { key: 'husbandry:write', label: 'Submit Daily Logs, Weights & Food Intakes' },
+      { key: 'animal:manage', label: 'Create & Edit Animal Profiles, Mobs & Census' },
     ]
   },
   {
-    module: 'Clinical & Medical',
+    module: 'Clinical & Veterinary',
     actions: [
-      { key: 'clinical:read', label: 'View Medical History & Active MARs' },
-      { key: 'clinical:write', label: 'Log Medical Administrations & Treatments' },
-      { key: 'clinical:vet', label: 'Issue Prescriptions / ZLA Vet Sign-Off' },
+      { key: 'clinical:read', label: 'View Medical History, Quarantine & MAR Charts' },
+      { key: 'clinical:write', label: 'Administer Daily Medications & Log Health Checks' },
+      { key: 'clinical:vet', label: 'Issue Prescriptions & Official Vet Sign-Offs' },
     ]
   },
   {
     module: 'Logistics & Movements',
     actions: [
-      { key: 'transfers:read', label: 'View Internal Moves & Transfer Audits' },
-      { key: 'transfers:write', label: 'Request Internal Animal Movements' },
-      { key: 'transfers:approve', label: 'Approve Internal & External Transfers' },
+      { key: 'transfers:read', label: 'View Internal Movements & Transfer Records' },
+      { key: 'transfers:write', label: 'Request Enclosure Changes & Relocations' },
+      { key: 'transfers:approve', label: 'Authorize External Transfers & Dispositions' },
+      { key: 'transfers:delete', label: 'Archive / Soft-Delete Movement & Transfer Logs' },
     ]
   },
   {
-    module: 'Gate & Ticketing',
+    module: 'Ticketing & Gate (Vouchers)',
     actions: [
-      { key: 'vouchers:scan', label: 'Scan & Redeem Active Vouchers via iPad' },
-      { key: 'vouchers:manage', label: 'Manual Override, Cancel or Expire Tickets' },
+      { key: 'vouchers:scan', label: 'Scan & Validate Digital QR Tickets via Scanner' },
+      { key: 'vouchers:manage', label: 'Issue Vouchers, View Purchaser PII & Overrides' },
     ]
   },
   {
-    module: 'Safety & Compliance',
+    module: 'Safety, Drills & Compliance',
     actions: [
-      { key: 'safety:read', label: 'View Incident Logs, Drills & Maintenance' },
-      { key: 'safety:write', label: 'Submit Incident Reports & Record Drills' },
-      { key: 'maintenance:manage', label: 'Assign & Close Facility Maintenance Tickets' },
+      { key: 'safety:read', label: 'View Incident Reports, Drills & Maintenance' },
+      { key: 'safety:write', label: 'Submit Incidents, Log First Aid & Record Drills' },
+      { key: 'maintenance:manage', label: 'Assign, Update & Resolve Maintenance Tickets' },
     ]
   },
   {
-    module: 'HR & Staffing',
+    module: 'Staffing, Rota & Absences',
     actions: [
-      { key: 'rota:view', label: 'View Public Shift Calendar' },
-      { key: 'rota:manage', label: 'Assign Daily Tasks & Shift Overrides' },
-      { key: 'shifts:manage', label: 'Access Shift Pattern Generator' },
-      { key: 'timesheet:self', label: 'Clock In / Clock Out (Own Timesheet)' },
-      { key: 'timesheet:manage', label: 'Approve & Edit Staff Timesheets' },
-      { key: 'hr:sensitive', label: 'View Medical Disclosures & HR Notes' },
+      { key: 'rota:view', label: 'View Public Staff Schedule & Calendar' },
+      { key: 'rota:manage', label: 'Assign Daily Shift Areas & Roster Overrides' },
+      { key: 'shifts:manage', label: 'Access 90-Day Shift Pattern Generator & Deletion' },
+      { key: 'leave:manage', label: 'Review, Formally Approve or Reject Leave Requests' },
+      { key: 'timesheet:self', label: 'Clock In / Clock Out (Self Timesheet Only)' },
+      { key: 'timesheet:manage', label: 'Review & Formally Approve Staff Timesheets' },
+      { key: 'hr:sensitive', label: 'View Private HR Medical Disclosures & Contacts' },
+    ]
+  },
+  {
+    module: 'Reports & Audits',
+    actions: [
+      { key: 'reports:view', label: 'View Live Operational Data Previews' },
+      { key: 'reports:export', label: 'Compile & Export ZLA Inspection Packs & .DOCX' },
     ]
   },
   {
     module: 'System Administration',
     actions: [
-      { key: 'admin:users', label: 'Provision & Deactivate User Accounts' },
-      { key: 'admin:system', label: 'Edit ZLA Config, Lists & DB Schema' },
+      { key: 'admin:users', label: 'Provision, Suspend & Modify Staff User Accounts' },
+      { key: 'admin:system', label: 'Edit ZLA Profile, Taxonomies & System Settings' },
+      { key: 'telemetry:manage', label: 'View Engine Health & Purge Central Error Telemetry' },
     ]
   }
 ];
 
+const ROLE_DISPLAY_ORDER = ['ADMIN', 'DIRECTOR', 'SENIOR_KEEPER', 'KEEPER', 'VOLUNTEER'];
+
 export function RBACMatrixPage() {
   const queryClient = useQueryClient();
+  const { profile, hasPermission } = useAuth();
 
-  const { data: matrix = [], isLoading } = useQuery({
-    queryKey: ['rbac_matrix'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('rbac_matrix').select('*');
-      if (error) throw error;
-      return data;
-    }
-  });
+  const isDirectorOrAdmin = ['DIRECTOR', 'ADMIN'].includes(profile?.role || '') || hasPermission('admin:system');
+
+  const { data: matrix = [], isLoading } = useQuery(rbacMatrixOptions);
 
   const updateMutation = useMutation({
     mutationFn: async ({ role, permissions }: { role: string, permissions: string[] }) => {
@@ -91,10 +121,14 @@ export function RBACMatrixPage() {
         .eq('role', role);
       if (error) throw error;
     },
-    onSuccess: () => {
+    onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['rbac_matrix'] });
-      queryClient.invalidateQueries({ queryKey: ['rbac_permissions'] }); // Hot-swaps active sessions instantly
+      queryClient.invalidateQueries({ queryKey: ['rbac_permissions'] });
+      toast.success(`Updated permissions for ${variables.role.replace(/_/g, ' ')}.`);
     },
+    onError: (err: any) => {
+      toast.error(`Failed to update permissions: ${err.message}`);
+    }
   });
 
   const togglePermission = (role: string, currentPerms: string[], permKey: string) => {
@@ -105,78 +139,123 @@ export function RBACMatrixPage() {
     updateMutation.mutate({ role, permissions: updated });
   };
 
-  // Sort roles alphabetically to ensure consistent column ordering
-  const displayRoles = [...matrix].sort((a, b) => a.role.localeCompare(b.role));
+  const displayRoles = useMemo(() => {
+    return [...matrix].sort((a, b) => {
+      const idxA = ROLE_DISPLAY_ORDER.indexOf(a.role);
+      const idxB = ROLE_DISPLAY_ORDER.indexOf(b.role);
+      return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
+    });
+  }, [matrix]);
+
+  const getRoleBadgeClass = (role: string) => {
+    switch (role) {
+      case 'ADMIN': return 'bg-rose-50 text-rose-700 border-rose-200';
+      case 'DIRECTOR': return 'bg-purple-50 text-purple-700 border-purple-200';
+      case 'SENIOR_KEEPER': return 'bg-amber-50 text-amber-700 border-amber-200';
+      case 'KEEPER': return 'bg-blue-50 text-blue-700 border-blue-200';
+      default: return 'bg-slate-100 text-slate-700 border-slate-200';
+    }
+  };
+
+  if (!isDirectorOrAdmin) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+        <ShieldAlert size={48} className="mb-4 opacity-20 text-slate-500" />
+        <h2 className="text-sm font-black uppercase tracking-widest text-slate-800">Restricted Access</h2>
+        <p className="text-xs font-medium text-slate-500 mt-1 max-w-sm text-center">
+          Only System Administrators and Directors can modify the global Role-Based Access Control matrix.
+        </p>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 animate-in fade-in duration-300">
+    <div className="h-full flex flex-col space-y-4 animate-in fade-in duration-300 relative">
       
-      <div className="border-b-2 border-slate-200 pb-6">
-        <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
-          <ShieldCheck className="text-emerald-600" size={24} /> Role-Based Access Matrix
-        </h3>
-        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Configure Granular System Permissions</p>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0 pb-1">
+        <div>
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-900 flex items-center gap-2">
+            <ShieldCheck size={16} className="text-slate-700" /> Role-Based Access Control (RBAC)
+          </h3>
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">
+            Configure live granular capabilities across all 5 operational system tiers
+          </p>
+        </div>
+
+        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-600 shrink-0">
+          <Sparkles size={12} className="text-emerald-600" />
+          <span>Hot-Swaps Active Sessions</span>
+        </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative">
         {isLoading ? (
-           <div className="flex justify-center py-12"><Loader2 className="animate-spin text-emerald-500" size={32} /></div>
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-10 flex items-center justify-center rounded-2xl">
+            <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center gap-3 border border-slate-100">
+              <Loader2 className="animate-spin text-slate-600" size={24} />
+              <span className="text-sm font-bold text-slate-700">Loading Permission Matrix...</span>
+            </div>
+          </div>
         ) : (
-          <div className="overflow-x-auto custom-scrollbar">
-            <table className="w-full text-left text-sm whitespace-nowrap min-w-full">
-              
-              <thead className="bg-slate-50 border-b border-slate-200">
+          <div className="flex-1 overflow-auto custom-scrollbar bg-slate-50/30">
+            <table className="w-full text-left whitespace-nowrap border-collapse">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-900 sticky top-0 z-20 backdrop-blur-md">
                 <tr>
-                  <th className="px-6 py-4 w-[400px] text-xs font-black text-slate-900 uppercase tracking-widest border-r border-slate-200">Module Capabilities</th>
+                  <th className="px-5 py-3.5 w-[380px] min-w-[280px] text-[10px] font-black uppercase tracking-widest text-slate-500 border-r border-slate-200 bg-slate-50">
+                    Module Capability / Permission Key
+                  </th>
                   {displayRoles.map(r => (
-                    <th key={r.role} className="px-6 py-4 text-center min-w-[150px]">
-                      <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest px-3 py-1.5 bg-white border border-slate-200 rounded-lg shadow-sm inline-block">
-                        {r.role.replace('_', ' ')}
+                    <th key={r.role} className="px-4 py-3.5 text-center min-w-[130px] bg-slate-50">
+                      <span className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest border shadow-sm inline-block ${getRoleBadgeClass(r.role)}`}>
+                        {r.role.replace(/_/g, ' ')}
                       </span>
                     </th>
                   ))}
                 </tr>
               </thead>
 
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y divide-slate-100 bg-white">
                 {PERMISSION_REGISTRY.map((moduleGroup, gIdx) => (
                   <React.Fragment key={gIdx}>
-                    {/* Category Header Row */}
-                    <tr className="bg-slate-50">
-                      <td colSpan={displayRoles.length + 1} className="px-6 py-3 text-[10px] font-black text-emerald-700 uppercase tracking-widest bg-emerald-50/50 border-y border-emerald-100/50">
+                    <tr className="bg-slate-50/80 sticky z-10">
+                      <td 
+                        colSpan={displayRoles.length + 1} 
+                        className="px-5 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-700 bg-slate-100/70 border-y border-slate-200"
+                      >
                         {moduleGroup.module}
                       </td>
                     </tr>
 
-                    {/* Permission Rows */}
                     {moduleGroup.actions.map((action, aIdx) => (
-                      <tr key={aIdx} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-3 border-r border-slate-200">
-                          <p className="font-bold text-slate-700 text-xs">{action.label}</p>
-                          <p className="text-[9px] font-mono text-slate-400 mt-0.5">{action.key}</p>
+                      <tr key={aIdx} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="px-5 py-3 border-r border-slate-200">
+                          <p className="font-bold text-slate-900 text-xs leading-snug">{action.label}</p>
+                          <p className="text-[9px] font-mono font-bold text-slate-400 tracking-wide mt-0.5">{action.key}</p>
                         </td>
 
-                        {/* Checkboxes for each role */}
                         {displayRoles.map(r => {
                           const hasPerm = (r.permissions || []).includes(action.key);
-                          const isRoot = r.role === 'ADMIN' || r.role === 'DIRECTOR'; // Root roles can't be unticked
+                          const isRoot = r.role === 'ADMIN' || r.role === 'DIRECTOR';
                           const isProcessing = updateMutation.isPending && updateMutation.variables?.role === r.role;
 
                           return (
-                            <td key={r.role} className="px-6 py-3 text-center border-l border-slate-100/50 bg-white">
+                            <td key={r.role} className="px-4 py-3 text-center border-l border-slate-100">
                               <button 
                                 onClick={() => togglePermission(r.role, r.permissions || [], action.key)}
                                 disabled={isRoot || isProcessing}
-                                className={`inline-flex items-center justify-center p-1.5 rounded-lg transition-all ${
-                                  isRoot ? 'opacity-50 cursor-not-allowed bg-slate-100' : 'hover:bg-slate-100 active:scale-95'
+                                className={`inline-flex items-center justify-center p-1.5 rounded-xl transition-all ${
+                                  isRoot 
+                                    ? 'opacity-40 cursor-not-allowed bg-slate-50' 
+                                    : 'hover:bg-slate-100 active:scale-95 cursor-pointer'
                                 }`}
+                                title={isRoot ? `${r.role} possesses permanent root bypass` : `Toggle ${action.key}`}
                               >
                                 {isProcessing ? (
-                                  <Loader2 size={20} className="animate-spin text-slate-400" />
+                                  <Loader2 size={18} className="animate-spin text-slate-400" />
                                 ) : hasPerm || isRoot ? (
-                                  <CheckSquare size={20} className="text-emerald-500" />
+                                  <CheckSquare size={18} className="text-emerald-600" />
                                 ) : (
-                                  <Square size={20} className="text-slate-300" />
+                                  <Square size={18} className="text-slate-300 hover:text-slate-400" />
                                 )}
                               </button>
                             </td>
@@ -192,13 +271,22 @@ export function RBACMatrixPage() {
         )}
       </div>
 
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3 text-amber-800">
-        <ShieldCheck className="shrink-0 mt-0.5 text-amber-600" size={20} />
-        <div className="text-xs">
-          <p className="font-black uppercase tracking-widest mb-1">Architecture Note</p>
-          <p className="font-medium">Changes to this matrix instantly update the specific array capabilities attached to active user sessions. ADMIN and DIRECTOR roles possess universal bypass rights and cannot have capabilities revoked.</p>
+      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-start gap-3 shadow-inner shrink-0">
+        <div className="p-2 bg-white rounded-xl border border-slate-200 text-slate-600 shrink-0 shadow-sm">
+          <Info size={16} />
+        </div>
+        <div>
+          <h4 className="text-xs font-black uppercase tracking-widest text-slate-900">
+            Root Level Security Protocol
+          </h4>
+          <p className="text-[11px] font-medium text-slate-600 mt-0.5 leading-relaxed">
+            Mutations to this matrix immediately invalidate client query caches across active staff sessions. <strong>ADMIN</strong> and <strong>DIRECTOR</strong> roles maintain root access and cannot have core privileges revoked.
+          </p>
         </div>
       </div>
+
     </div>
   );
 }
+
+export default RBACMatrixPage;
