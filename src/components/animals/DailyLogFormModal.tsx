@@ -1,708 +1,251 @@
-import React, { useState, useMemo } from 'react';
-import { useForm } from '@tanstack/react-form';
-import { useMutation, useQueryClient, useQuery, queryOptions } from '@tanstack/react-query';
-import { X, Save, Loader2, AlertCircle, Plus, Trash2, Scale, Utensils, ThermometerSun, ShieldAlert, Droplets } from 'lucide-react';
-import { format, parse } from 'date-fns';
-import { toast } from 'sonner'; 
-import { z } from 'zod';
-import { dailyLogService } from '../../services/dailyLogService';
+import React, { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { ClipboardList, X, Loader2 } from 'lucide-react';
+import { format } from 'date-fns';
+import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
-import { Animal, DailyLog } from '../../types';
-
-// ------------------------------------------------------------------
-// ZOD FIREWALL: ZLA 1981 AUDIT TRAIL SCHEMA
-// ------------------------------------------------------------------
-const DailyLogComplianceSchema = z.object({
-  log_date: z.string().min(1, "ZLA COMPLIANCE: Log date is strictly required."),
-  conducted_by: z.string().uuid("ZLA COMPLIANCE: An active staff member must be selected for the audit trail."),
-  log_time: z.string().optional(),
-  notes: z.string().optional().nullable(),
-  weight_not_required: z.boolean().optional(),
-  metric_weight: z.any().optional(),
-  lbs: z.any().optional(),
-  oz: z.any().optional(),
-  eighths: z.any().optional(),
-  temperature_c: z.any().optional(),
-  basking_temp_c: z.any().optional(),
-  cool_temp_c: z.any().optional(),
-  meals: z.array(z.any()).optional(),
-  mist_level: z.string().optional(), 
-  am_pm: z.string().optional(),     
-  _optimisticId: z.string().optional()
-}).superRefine((data, ctx) => {
-  if (data.weight_not_required === false && !data.metric_weight && !data.oz && !data.lbs) {
-    if (!data.notes || data.notes.trim() === '') {
-       ctx.addIssue({
-         code: z.ZodIssueCode.custom,
-         path: ['notes'],
-         message: "ZLA COMPLIANCE: If weight data is missing, you must provide a justification in the notes."
-       });
-    }
-  }
-});
-
-const generateOfflineUUID = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-};
+import { useAuth } from '../../lib/auth';
+import { Animal, LogType } from '../../types';
 
 interface DailyLogFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   animal: Animal;
-  mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION' | 'MISTING';
-  initialLogData?: DailyLog | any; 
+  defaultType?: LogType;
 }
 
-interface MealInput {
-  id: string;
-  food_item: string;
-  feed_method: string;
-  time: string;
-  quantity_offered: string | number;
-  quantity_consumed: string | number;
-  calci_dust_added: boolean;
-}
+const LOG_TYPES: LogType[] = [
+  'OBSERVATION',
+  'FEEDING',
+  'WEIGHT',
+  'MEDICATION',
+  'CLINICAL',
+  'BEHAVIOUR',
+  'ENCLOSURE',
+  'TEMPERATURE'
+];
 
-const operationalListsOptions = queryOptions({
-  queryKey: ['operational_lists'],
-  queryFn: async () => {
-    const { data, error } = await supabase.from('operational_lists').select('*').eq('is_deleted', false);
-    if (error) throw error;
-    return data || [];
-  },
-  staleTime: 0,
-  gcTime: 1209600000,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
-});
-
-// --- UNIFIED INPUT STYLING ---
-function FormInput({ field, label, type = 'text', placeholder, hasError }: { field: any; label: string; type?: string; placeholder?: string; hasError?: boolean }) {
-  const baseClasses = `w-full p-2.5 bg-slate-50 border rounded-xl outline-none text-sm md:text-xs font-bold text-slate-800 transition-all focus:bg-white focus:ring-4 ${
-    hasError 
-      ? 'border-rose-300 focus:border-rose-500 focus:ring-rose-500/10' 
-      : 'border-slate-200 focus:border-slate-400 focus:ring-slate-900/5'
-  }`;
-
-  return (
-    <div className="flex flex-col gap-1 w-full">
-      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{label}</label>
-      {type === 'textarea' ? (
-        <textarea
-          value={field.state.value}
-          onBlur={field.handleBlur}
-          onChange={(e) => field.handleChange(e.target.value)}
-          placeholder={placeholder}
-          className={`${baseClasses} h-24 resize-none custom-scrollbar`}
-        />
-      ) : (
-        <input
-          type={type === 'number' ? 'text' : type}
-          inputMode={type === 'number' ? 'decimal' : undefined}
-          value={field.state.value}
-          onBlur={field.handleBlur}
-          onChange={(e) => field.handleChange(e.target.value)}
-          placeholder={placeholder}
-          className={baseClasses}
-        />
-      )}
-    </div>
-  );
-}
-
-function FormSelect({ field, label, options, placeholder, hasError }: { field: any; label: string; options: { value: string, label: string }[], placeholder?: string; hasError?: boolean }) {
-  return (
-    <div className="flex flex-col gap-1 w-full">
-      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{label}</label>
-      <select
-        value={field.state.value}
-        onBlur={field.handleBlur}
-        onChange={(e) => field.handleChange(e.target.value)}
-        className={`w-full p-2.5 bg-slate-50 border rounded-xl outline-none text-sm md:text-xs font-bold text-slate-800 transition-all focus:bg-white focus:ring-4 cursor-pointer appearance-none ${
-          hasError 
-            ? 'border-rose-300 focus:border-rose-500 focus:ring-rose-500/10' 
-            : 'border-slate-200 focus:border-slate-400 focus:ring-slate-900/5'
-        }`}
-      >
-        {placeholder && <option value="" disabled>{placeholder}</option>}
-        {options.map((opt, i) => (
-          <option key={i} value={opt.value}>{opt.label}</option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initialLogData }: DailyLogFormModalProps) {
+export function DailyLogFormModal({
+  isOpen,
+  onClose,
+  animal,
+  defaultType = 'OBSERVATION'
+}: DailyLogFormModalProps) {
   const queryClient = useQueryClient();
-  const [systemErrorMsg, setSystemErrorMsg] = useState<string | null>(null);
-  const [firewallError, setFirewallError] = useState<{ message: string, path: string } | null>(null);
+  const { user, profile } = useAuth();
 
-  // --- THEME ENGINE ---
-  const theme = useMemo(() => {
-    switch(mode) {
-      case 'WEIGHT': return { icon: Scale, color: 'text-emerald-600', activeBg: 'bg-emerald-600', activeText: 'text-emerald-700', btn: 'bg-emerald-600 hover:bg-emerald-500' };
-      case 'FEEDING': return { icon: Utensils, color: 'text-amber-600', activeBg: 'bg-amber-600', activeText: 'text-amber-700', btn: 'bg-amber-600 hover:bg-amber-500' };
-      case 'TEMPERATURE': return { icon: ThermometerSun, color: 'text-blue-600', activeBg: 'bg-blue-600', activeText: 'text-blue-700', btn: 'bg-blue-600 hover:bg-blue-500' };
-      case 'MISTING': return { icon: Droplets, color: 'text-cyan-600', activeBg: 'bg-cyan-600', activeText: 'text-cyan-700', btn: 'bg-cyan-600 hover:bg-cyan-500' };
-      default: return { icon: AlertCircle, color: 'text-slate-600', activeBg: 'bg-slate-600', activeText: 'text-slate-700', btn: 'bg-slate-800 hover:bg-slate-700' };
-    }
-  }, [mode]);
-
-  const Icon = theme.icon;
-
-  const { data: activeStaff = [] } = useQuery({
-    queryKey: ['active-staff'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('users').select('id, name, initials').eq('is_active', true).eq('is_deleted', false);
-      if (error) throw error;
-      return data || [];
-    },
-    staleTime: 0,
-    gcTime: 1209600000,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
+  const [form, setForm] = useState({
+    log_type: defaultType,
+    log_date: format(new Date(), 'yyyy-MM-dd HH:mm'),
+    notes: '',
+    weight_grams: '' as number | string,
+    temperature_celsius: '' as number | string,
+    food_item: '',
+    quantity: 1,
+    quantity_unit: 'item'
   });
 
-  const { data: operationalLists = [] } = useQuery(operationalListsOptions);
+  const createLogMutation = useMutation({
+    mutationFn: async (payload: typeof form) => {
+      const timestamp = payload.log_date ? new Date(payload.log_date).toISOString() : new Date().toISOString();
 
-  const taxonomicMatch = [animal.category, `${animal.category}S`, 'GENERAL'];
-  const foodTypes = useMemo(() => operationalLists.filter((l: any) => l.category === 'food_type' && taxonomicMatch.includes(l.description)), [operationalLists, animal.category]);
-  const feedMethods = useMemo(() => operationalLists.filter((l: any) => l.category === 'feed_method' && taxonomicMatch.includes(l.description)), [operationalLists, animal.category]);
+      const feedDetails = payload.log_type === 'FEEDING' ? {
+        meals: [{
+          food_item: payload.food_item || 'Standard Diet',
+          quantity: payload.quantity || 1,
+          quantity_unit: payload.quantity_unit || 'item'
+        }]
+      } : null;
 
-  const unpackGramsToImperial = (grams: number | null, unit: string) => {
-    if (!grams) return { lbs: '', oz: '', eighths: '0' };
-    const totalOunces = grams / 28.3495;
-    if (unit === 'lb') {
-      const lbs = Math.floor(totalOunces / 16);
-      const remainderOunces = totalOunces - (lbs * 16);
-      let oz = Math.floor(remainderOunces);
-      let eighths = Math.round((remainderOunces - oz) * 8);
-      if (eighths >= 8) { oz += 1; eighths = 0; }
-      return { lbs: lbs.toString(), oz: oz.toString(), eighths: eighths.toString() };
-    } else if (unit === 'oz') {
-      let oz = Math.floor(totalOunces);
-      let eighths = Math.round((totalOunces - oz) * 8);
-      if (eighths >= 8) { oz += 1; eighths = 0; }
-      return { lbs: '', oz: oz.toString(), eighths: eighths.toString() };
-    }
-    return { lbs: '', oz: '', eighths: '0' };
-  };
+      const { data, error } = await supabase
+        .from('daily_logs')
+        .insert([{
+          animal_id: animal.id,
+          log_type: payload.log_type,
+          log_date: timestamp,
+          notes: payload.notes || null,
+          weight_grams: payload.weight_grams !== '' ? Number(payload.weight_grams) : null,
+          temperature_celsius: payload.temperature_celsius !== '' ? Number(payload.temperature_celsius) : null,
+          feed_details: feedDetails,
+          created_by: profile?.name || user?.email || 'Keeper'
+        }])
+        .select()
+        .single();
 
-  const initialImperial = unpackGramsToImperial(initialLogData?.weight_grams || null, animal.weight_unit || 'g');
+      if (error) throw error;
 
-  const initialMeals = (): MealInput[] => {
-    if (mode !== 'FEEDING') return [];
-    const existing = initialLogData?.feed_details?.meals || [];
-    if (existing.length > 0) {
-      return existing.map((m: any) => ({
-        id: generateOfflineUUID(),
-        food_item: m.food_item || '',
-        feed_method: m.feed_method || '',
-        quantity_offered: m.quantity_offered?.toString() || m.food_offered_g?.toString() || '',
-        quantity_consumed: m.quantity_consumed?.toString() || m.food_consumed_g?.toString() || '',
-        calci_dust_added: !!m.calci_dust_added,
-        time: m.time ? format(new Date(m.time), 'HH:mm') : format(new Date(), 'HH:mm')
-      }));
-    }
-    return [{ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity_offered: '', quantity_consumed: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') }];
-  };
-
-  const logMutation = useMutation({
-    mutationFn: async (value: any) => {
-      const safeTime = (value.log_time || '12:00').substring(0, 5); 
-      const localDate = parse(`${value.log_date} ${safeTime}`, 'yyyy-MM-dd HH:mm', new Date());
-      const combinedTimestamp = localDate.toISOString();
-
-      let finalWeightGrams: number | null = null;
-      if (mode === 'WEIGHT' && !value.weight_not_required) {
-        const safeWeightParse = (val: any) => {
-          if (val === '' || val === null || val === undefined) return 0;
-          const parsed = parseFloat(String(val).replace(/[^0-9.]/g, ''));
-          return isNaN(parsed) ? 0 : parsed;
-        };
-        
-        let hasInput = false;
-
-        if (animal.weight_unit === 'lb') {
-          hasInput = value.lbs !== '' || value.oz !== '';
-          finalWeightGrams = ((safeWeightParse(value.lbs) * 16) + safeWeightParse(value.oz) + (safeWeightParse(value.eighths) / 8)) * 28.3495;
-        } else if (animal.weight_unit === 'oz') {
-          hasInput = value.oz !== '';
-          finalWeightGrams = (safeWeightParse(value.oz) + (safeWeightParse(value.eighths) / 8)) * 28.3495;
-        } else if (animal.weight_unit === 'kg') {
-          hasInput = value.metric_weight !== '';
-          finalWeightGrams = safeWeightParse(value.metric_weight) * 1000;
-        } else {
-          hasInput = value.metric_weight !== '';
-          finalWeightGrams = safeWeightParse(value.metric_weight);
-        }
-
-        if (!hasInput) finalWeightGrams = null;
-        else if (finalWeightGrams) finalWeightGrams = Number(finalWeightGrams.toFixed(2));
-      }
-
-      if (mode === 'FEEDING') {
-        const formattedMeals = value.meals.map((m: MealInput) => {
-          const mealLocalTime = parse(`${value.log_date} ${m.time.substring(0,5)}`, 'yyyy-MM-dd HH:mm', new Date());
-          return {
-            time: mealLocalTime.toISOString(),
-            food_item: m.food_item,
-            feed_method: m.feed_method,
-            quantity_offered: Number(String(m.quantity_offered || '0').replace(/[^0-9.]/g, '')),
-            quantity_consumed: Number(String(m.quantity_consumed || '0').replace(/[^0-9.]/g, '')),
-            calci_dust_added: m.calci_dust_added
-          };
-        });
-
-        if (initialLogData?.id) {
-          return await dailyLogService.updateLogDirect(initialLogData.id, {
-            feed_details: { meals: formattedMeals },
-            notes: value.notes || null,
-            log_date: combinedTimestamp,
-            conducted_by: value.conducted_by
-          });
-        } else {
-          return await dailyLogService.commitLog({
-            id: value._optimisticId, 
+      // If weight was recorded, also push to normalized weight_logs
+      if (payload.log_type === 'WEIGHT' && payload.weight_grams !== '') {
+        await supabase
+          .from('weight_logs')
+          .insert([{
             animal_id: animal.id,
-            log_type: 'FEEDING',
-            log_date: combinedTimestamp,
-            notes: value.notes || null,
-            conducted_by: value.conducted_by,
-            feed_details: { meals: formattedMeals }
-          });
-        }
+            weight_grams: Number(payload.weight_grams),
+            recorded_at: timestamp,
+            recorded_by: user?.id || null,
+            notes: payload.notes || null
+          }]);
       }
 
-      const updates: any = { 
-        notes: value.notes || null, 
-        log_date: combinedTimestamp,
-        conducted_by: value.conducted_by
-      };
-
-      if (mode === 'WEIGHT') {
-        updates.weight_grams = finalWeightGrams;
-        updates.weight_not_required = value.weight_not_required;
-        updates.weight_unit = animal.weight_unit;
-      }
-      
-      if (mode === 'TEMPERATURE') {
-        const safeTempParse = (val: any) => {
-          if (val === '' || val === null || val === undefined) return null;
-          const parsed = parseFloat(String(val).replace(/[^0-9.-]/g, ''));
-          return isNaN(parsed) ? null : parsed;
-        };
-        updates.temperature_c = safeTempParse(value.temperature_c);
-        updates.basking_temp_c = safeTempParse(value.basking_temp_c);
-        updates.cool_temp_c = safeTempParse(value.cool_temp_c);
-      }
-
-      if (mode === 'MISTING') {
-        updates.mist_level = value.mist_level;
-        updates.am_pm = value.am_pm;
-      }
-
-      if (initialLogData?.id) {
-        return await dailyLogService.updateLogDirect(initialLogData.id, updates);
-      } else {
-        return await dailyLogService.commitLog({ id: value._optimisticId, animal_id: animal.id, log_type: mode, ...updates });
-      }
+      return data;
     },
-    
-    onMutate: async (variables) => {
-      await queryClient.cancelQueries({ queryKey: ['daily_logs'] });
-
-      const previousDailyLogs = queryClient.getQueryData<DailyLog[]>(['daily_logs']);
-      const optimisticId = generateOfflineUUID();
-      variables._optimisticId = optimisticId; 
-      
-      const safeTime = (variables.log_time || '12:00').substring(0, 5); 
-      const localDate = parse(`${variables.log_date} ${safeTime}`, 'yyyy-MM-dd HH:mm', new Date());
-      
-      let optimisticGrams = null;
-      if (mode === 'WEIGHT' && !variables.weight_not_required) {
-        const safeParse = (val: any) => parseFloat(String(val || '0').replace(/[^0-9.]/g, '')) || 0;
-        if (animal.weight_unit === 'lb') optimisticGrams = ((safeParse(variables.lbs) * 16) + safeParse(variables.oz) + (safeParse(variables.eighths) / 8)) * 28.3495;
-        else if (animal.weight_unit === 'oz') optimisticGrams = (safeParse(variables.oz) + (safeParse(variables.eighths) / 8)) * 28.3495;
-        else if (animal.weight_unit === 'kg') optimisticGrams = safeParse(variables.metric_weight) * 1000;
-        else optimisticGrams = safeParse(variables.metric_weight);
-      }
-
-      const optimisticRecord = {
-        id: initialLogData?.id || optimisticId,
-        animal_id: animal.id,
-        log_type: mode,
-        log_date: localDate.toISOString(),
-        notes: variables.notes || '',
-        conducted_by: variables.conducted_by,
-        weight_grams: mode === 'WEIGHT' ? optimisticGrams : initialLogData?.weight_grams,
-        weight_not_required: mode === 'WEIGHT' ? variables.weight_not_required : initialLogData?.weight_not_required,
-        temperature_c: mode === 'TEMPERATURE' ? parseFloat(variables.temperature_c || '0') : initialLogData?.temperature_c,
-        feed_details: mode === 'FEEDING' ? { meals: variables.meals } : initialLogData?.feed_details,
-        mist_level: mode === 'MISTING' ? variables.mist_level : initialLogData?.mist_level,
-        am_pm: mode === 'MISTING' ? variables.am_pm : initialLogData?.am_pm,
-        _isOptimistic: true
-      };
-
-      queryClient.setQueryData<DailyLog[]>(['daily_logs'], (old) => {
-        if (!old) return [optimisticRecord as DailyLog];
-        
-        if (initialLogData?.id) {
-          return old.map(log => log.id === initialLogData.id ? { ...log, ...optimisticRecord } as DailyLog : log);
-        }
-        
-        const existingIndex = old.findIndex(log => log.animal_id === animal.id);
-        if (existingIndex > -1) {
-          const newArray = [...old];
-          newArray[existingIndex] = { ...newArray[existingIndex], ...optimisticRecord } as DailyLog;
-          return newArray;
-        }
-        
-        return [optimisticRecord as DailyLog, ...old];
-      });
-
-      return { previousDailyLogs };
-    },
-    
-    onError: (err: any, variables, context) => {
-      if (context?.previousDailyLogs) queryClient.setQueryData(['daily_logs'], context.previousDailyLogs);
-      setSystemErrorMsg(err.message || 'Failed to queue log data.');
-    },
-    
     onSuccess: () => {
-      toast.success(`${mode.charAt(0) + mode.slice(1).toLowerCase()} log committed securely.`);
+      toast.success(`Log recorded for ${animal.name}`);
+      queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['weight_logs'] });
       onClose();
     },
-
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
+    onError: (err: any) => {
+      toast.error(`Failed to record log: ${err.message}`);
     }
   });
 
-  const form = useForm({
-    defaultValues: {
-      log_date: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
-      log_time: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'HH:mm') : format(new Date(), 'HH:mm'),
-      conducted_by: initialLogData?.conducted_by || '', 
-      notes: initialLogData?.notes || '', 
-      lbs: initialImperial.lbs, oz: initialImperial.oz, eighths: initialImperial.eighths,
-      metric_weight: animal.weight_unit === 'kg' && initialLogData?.weight_grams ? (initialLogData.weight_grams / 1000).toString() : initialLogData?.weight_grams?.toString() || '',
-      weight_not_required: initialLogData?.weight_not_required || false,
-      temperature_c: initialLogData?.temperature_c?.toString() || '',
-      basking_temp_c: initialLogData?.basking_temp_c?.toString() || '',
-      cool_temp_c: initialLogData?.cool_temp_c?.toString() || '',
-      meals: initialMeals(),
-      mist_level: initialLogData?.mist_level || 'MEDIUM',
-      am_pm: initialLogData?.am_pm || format(new Date(), 'a').toUpperCase(),
-      _optimisticId: '' 
-    },
-    onSubmit: async ({ value }) => {
-      setFirewallError(null);
-      setSystemErrorMsg(null);
-
-      const validation = DailyLogComplianceSchema.safeParse(value);
-      if (!validation.success) {
-        const firstIssue = validation.error.issues[0];
-        setFirewallError({ message: firstIssue.message, path: firstIssue.path[0] as string });
-        return; 
-      }
-
-      if (logMutation.isPending) return;
-      logMutation.mutate(value);
-    }
-  });
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    createLogMutation.mutate(form);
+  };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] flex flex-col items-center justify-center p-0 md:p-4 bg-slate-900/60 backdrop-blur-sm">
-      <div className="bg-white w-full h-[100dvh] md:h-auto md:max-h-[90vh] md:max-w-xl md:rounded-3xl shadow-2xl overflow-hidden flex flex-col border-0 md:border md:border-slate-200 relative">
-        
-        {/* HEADER */}
-        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
-          <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl ${theme.color.replace('text-', 'bg-').replace('600', '50')}`}>
-              <Icon size={18} className={theme.color} />
-            </div>
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh] font-sans">
+        <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+          <h3 className="font-black text-slate-900 uppercase tracking-widest text-xs flex items-center gap-2">
+            <ClipboardList size={15} className="text-slate-700" />
+            Add Husbandry Log — <span className="text-emerald-600">{animal.name}</span>
+          </h3>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-700 rounded-lg">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 overflow-y-auto custom-scrollbar space-y-4 text-xs font-medium">
+          
+          <div className="grid grid-cols-2 gap-3">
             <div>
-              <h2 className="text-[15px] font-black text-slate-900 uppercase tracking-widest leading-tight">
-                {initialLogData ? `Amend ${mode}` : `Log ${mode}`}
-              </h2>
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider leading-tight">
-                {animal.name}
-              </p>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+                Log Type *
+              </label>
+              <select
+                required
+                value={form.log_type}
+                onChange={(e) => setForm(prev => ({ ...prev, log_type: e.target.value as LogType }))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+              >
+                {LOG_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+                Date & Time
+              </label>
+              <input
+                type="datetime-local"
+                required
+                value={form.log_date}
+                onChange={(e) => setForm(prev => ({ ...prev, log_date: e.target.value }))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+              />
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
-            <X size={20} />
-          </button>
-        </div>
 
-        {/* BODY */}
-        <div className="p-5 overflow-y-auto custom-scrollbar bg-white flex-1 relative space-y-6">
-          
-          {systemErrorMsg && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-rose-700 text-xs font-bold shadow-sm">
-              <AlertCircle size={16} className="shrink-0 mt-0.5" />
-              <div>{systemErrorMsg}</div>
-            </div>
-          )}
-
-          {firewallError && (
-            <div className="p-4 bg-rose-50 border border-rose-300 rounded-xl flex items-start gap-3 text-rose-900 shadow-sm animate-in fade-in slide-in-from-top-2">
-              <ShieldAlert size={18} className="shrink-0 mt-0.5 text-rose-600" />
-              <div className="flex flex-col">
-                <span className="text-xs font-black uppercase tracking-widest text-rose-600">Audit Trail Failure</span>
-                <span className="text-sm font-bold mt-1">{firewallError.message}</span>
-              </div>
-            </div>
-          )}
-
-          <form id="quick-log-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-6">
-            
-            {/* ROW 1: AUDIT METADATA */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="col-span-1 md:col-span-1">
-                <form.Field name="log_date">{(field) => <FormInput field={field} label="Date" type="date" />}</form.Field>
-              </div>
-              {mode !== 'FEEDING' && (
-                <div className="col-span-1 md:col-span-1">
-                  <form.Field name="log_time">{(field) => <FormInput field={field} label="Time" type="time" />}</form.Field>
-                </div>
-              )}
-              <div className={`col-span-2 ${mode === 'FEEDING' ? 'md:col-span-3' : 'md:col-span-2'}`}>
-                <form.Field name="conducted_by">
-                  {(field) => (
-                    <FormSelect 
-                      field={field} 
-                      label="Conducted By *" 
-                      placeholder="-- Select Keeper --"
-                      hasError={firewallError?.path === 'conducted_by'}
-                      options={activeStaff.map((staff: any) => ({ 
-                        value: staff.id, 
-                        label: `${staff.name} (${staff.initials || '?'})` 
-                      }))} 
-                    />
-                  )}
-                </form.Field>
-              </div>
-            </div>
-
-            <hr className="border-slate-100" />
-
-            {/* ROW 2: DYNAMIC MODE INPUTS */}
-            
-            {mode === 'WEIGHT' && (
-              <div className="space-y-4">
-                <form.Subscribe selector={(state) => state.values.weight_not_required}>
-                  {(exempt) => !exempt && (
-                    <div className="animate-in fade-in">
-                      {animal.weight_unit === 'lb' && (
-                        <div className="grid grid-cols-3 gap-3">
-                          <form.Field name="lbs">{(field) => <FormInput field={field} label="Lbs" type="number" />}</form.Field>
-                          <form.Field name="oz">{(field) => <FormInput field={field} label="Oz" type="number" />}</form.Field>
-                          <form.Field name="eighths">
-                            {(field) => <FormSelect field={field} label="Eighths" options={[0,1,2,3,4,5,6,7].map(n => ({ value: n.toString(), label: `${n}/8` }))} />}
-                          </form.Field>
-                        </div>
-                      )}
-
-                      {animal.weight_unit === 'oz' && (
-                        <div className="grid grid-cols-2 gap-3">
-                          <form.Field name="oz">{(field) => <FormInput field={field} label="Ounces (Oz)" type="number" />}</form.Field>
-                          <form.Field name="eighths">
-                            {(field) => <FormSelect field={field} label="Eighths" options={[0,1,2,3,4,5,6,7].map(n => ({ value: n.toString(), label: `${n}/8` }))} />}
-                          </form.Field>
-                        </div>
-                      )}
-
-                      {(animal.weight_unit === 'g' || animal.weight_unit === 'kg' || !animal.weight_unit) && (
-                        <form.Field name="metric_weight">{(field) => <FormInput field={field} label={`Mass in ${animal.weight_unit || 'g'}`} type="number" />}</form.Field>
-                      )}
-                    </div>
-                  )}
-                </form.Subscribe>
-
-                <div className="pt-2">
-                  <form.Field name="weight_not_required">
-                    {(field) => (
-                      <label className="flex items-center gap-3 cursor-pointer group">
-                        <input type="checkbox" checked={field.state.value} onChange={(e) => field.handleChange(e.target.checked)} className="w-4 h-4 text-slate-800 border-slate-300 rounded focus:ring-slate-500 cursor-pointer" />
-                        <span className="text-xs font-bold text-slate-500 group-hover:text-slate-800 transition-colors">Weight Not Required (Must justify in notes)</span>
-                      </label>
-                    )}
-                  </form.Field>
-                </div>
-              </div>
-            )}
-
-            {mode === 'TEMPERATURE' && (
-              <div className="animate-in fade-in">
-                {animal.ambient_temp_only ? (
-                  <form.Field name="temperature_c">{(field) => <FormInput field={field} label="Ambient Enclosure (°C)" type="number" />}</form.Field>
-                ) : (
-                  <div className="grid grid-cols-2 gap-3">
-                    <form.Field name="basking_temp_c">{(field) => <FormInput field={field} label="Basking Spot (°C)" type="number" />}</form.Field>
-                    <form.Field name="cool_temp_c">{(field) => <FormInput field={field} label="Cool Zone (°C)" type="number" />}</form.Field>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {mode === 'MISTING' && (
-              <div className="space-y-6 animate-in fade-in">
-                
-                {/* Sleek Segmented Control for Intensity */}
-                <form.Field name="mist_level">
-                  {(field) => (
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">Mist Intensity</label>
-                      <div className="flex bg-slate-100 p-1.5 rounded-xl">
-                        {['LIGHT', 'MEDIUM', 'HEAVY'].map(level => (
-                          <button
-                            key={level}
-                            type="button"
-                            onClick={() => field.handleChange(level)}
-                            className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${
-                              field.state.value === level 
-                                ? `${theme.activeBg} text-white shadow-md scale-100` 
-                                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50 scale-95'
-                            }`}
-                          >
-                            {level}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </form.Field>
-
-                {/* Sleek Segmented Control for AM/PM */}
-                <form.Field name="am_pm">
-                  {(field) => (
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">Time of Day</label>
-                      <div className="flex bg-slate-100 p-1.5 rounded-xl">
-                        {['AM', 'PM'].map(time => (
-                          <button
-                            key={time}
-                            type="button"
-                            onClick={() => field.handleChange(time)}
-                            className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${
-                              field.state.value === time 
-                                ? `${theme.activeBg} text-white shadow-md scale-100` 
-                                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50 scale-95'
-                            }`}
-                          >
-                            {time}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </form.Field>
-
-              </div>
-            )}
-
-            {mode === 'FEEDING' && (
-              <div className="space-y-4 animate-in fade-in">
-                <form.Field name="meals">
-                  {(field) => (
-                    <>
-                      <div className="flex items-center justify-between pb-1">
-                        <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Rations Logged</span>
-                        <button
-                          type="button"
-                          onClick={() => field.pushValue({ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity_offered: '', quantity_consumed: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') })}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors ${theme.color.replace('text-', 'bg-').replace('600', '50')} ${theme.color} hover:bg-slate-100`}
-                        >
-                          <Plus size={12} /> Add Row
-                        </button>
-                      </div>
-
-                      <div className="space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar">
-                        {field.state.value.map((_, index) => (
-                          <div key={index} className="relative space-y-3 group border-l-2 border-slate-200 pl-4 py-1 hover:border-amber-400 transition-colors">
-                            {field.state.value.length > 1 && (
-                              <button type="button" onClick={() => field.removeValue(index)} className="absolute -top-1 right-0 text-slate-300 hover:text-rose-600 hover:bg-rose-50 p-1.5 rounded-lg transition-colors md:opacity-0 group-hover:opacity-100">
-                                <Trash2 size={14} />
-                              </button>
-                            )}
-                            
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              <form.Field name={`meals[${index}].food_item` as const}>
-                                {(subField) => <FormSelect field={subField} label={`Food Item (${index + 1})`} placeholder="-- Select Food --" options={foodTypes.map((f: any) => ({ value: f.name, label: f.name }))} />}
-                              </form.Field>
-                              <form.Field name={`meals[${index}].feed_method` as const}>
-                                {(subField) => <FormSelect field={subField} label="Feed Method" placeholder="-- Select Method --" options={feedMethods.map((f: any) => ({ value: f.name, label: f.name }))} />}
-                              </form.Field>
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-3">
-                              <form.Field name={`meals[${index}].time` as const}>{(subField) => <FormInput field={subField} label="Time" type="time" />}</form.Field>
-                              <form.Field name={`meals[${index}].quantity_offered` as const}>{(subField) => <FormInput field={subField} label="Offered (g)" type="number" />}</form.Field>
-                              <form.Field name={`meals[${index}].quantity_consumed` as const}>{(subField) => <FormInput field={subField} label="Consum (g)" type="number" />}</form.Field>
-                            </div>
-
-                            <div className="pt-1">
-                              <form.Field name={`meals[${index}].calci_dust_added` as const}>
-                                {(subField) => (
-                                  <label className="flex items-center gap-2 cursor-pointer group/toggle">
-                                    <input type="checkbox" checked={Boolean(subField.state.value)} onChange={(e) => subField.handleChange(e.target.checked)} className="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500 cursor-pointer" />
-                                    <span className="text-[10px] md:text-[11px] font-bold text-slate-500 group-hover/toggle:text-slate-800 uppercase tracking-wide transition-colors">Add Calci-Dust Modifier</span>
-                                  </label>
-                                )}
-                              </form.Field>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </form.Field>
-              </div>
-            )}
-
-            {(mode === 'WEIGHT' || mode === 'TEMPERATURE' || mode === 'MISTING') && <hr className="border-slate-100" />}
-
-            {/* ROW 3: NOTES */}
+          {form.log_type === 'WEIGHT' && (
             <div>
-              <form.Field name="notes">
-                {(field) => <FormInput field={field} label="Observation / Treatment Notes" type="textarea" placeholder="Enter additional context here..." hasError={firewallError?.path === 'notes'} />}
-              </form.Field>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+                Weight in Grams *
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                required
+                placeholder="e.g. 385.0"
+                value={form.weight_grams}
+                onChange={(e) => setForm(prev => ({ ...prev, weight_grams: e.target.value ? Number(e.target.value) : '' }))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+              />
             </div>
+          )}
 
-          </form>
-        </div>
+          {form.log_type === 'TEMPERATURE' && (
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+                Temperature (°C) *
+              </label>
+              <input
+                type="number"
+                step="0.1"
+                required
+                placeholder="e.g. 24.5"
+                value={form.temperature_celsius}
+                onChange={(e) => setForm(prev => ({ ...prev, temperature_celsius: e.target.value ? Number(e.target.value) : '' }))}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+              />
+            </div>
+          )}
 
-        {/* FOOTER */}
-        <div className="px-5 py-4 border-t border-slate-100 flex items-center justify-end bg-white gap-3 shrink-0">
-          <button type="button" onClick={onClose} className="px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">
-            Cancel
-          </button>
-          <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
-            {([canSubmit, isSubmitting]) => (
-              <button
-                type="submit"
-                form="quick-log-form"
-                disabled={!canSubmit || isSubmitting || logMutation.isPending}
-                className={`flex items-center justify-center gap-2 px-8 py-2.5 text-white rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-md disabled:opacity-50 disabled:shadow-none ${theme.btn}`}
-              >
-                {(isSubmitting || logMutation.isPending) ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                {(isSubmitting || logMutation.isPending) ? 'Processing' : initialLogData ? 'Save' : 'Commit'}
-              </button>
-            )}
-          </form.Subscribe>
-        </div>
+          {form.log_type === 'FEEDING' && (
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Diet Item *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Day-Old Chick"
+                  value={form.food_item}
+                  onChange={(e) => setForm(prev => ({ ...prev, food_item: e.target.value }))}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Qty</label>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="any"
+                  value={form.quantity}
+                  onChange={(e) => setForm(prev => ({ ...prev, quantity: parseFloat(e.target.value) || 1 }))}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+                />
+              </div>
+            </div>
+          )}
 
+          <div>
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+              Observations & Notes
+            </label>
+            <textarea
+              rows={3}
+              placeholder="Record behaviour, physical condition, appetite..."
+              value={form.notes}
+              onChange={(e) => setForm(prev => ({ ...prev, notes: e.target.value }))}
+              className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
+            />
+          </div>
+
+          <div className="pt-2 flex justify-end gap-2 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-xl uppercase tracking-widest"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={createLogMutation.isPending}
+              className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 flex items-center gap-2 shadow-sm"
+            >
+              {createLogMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+              <span>Save Log</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
 }
+
+export default DailyLogFormModal;

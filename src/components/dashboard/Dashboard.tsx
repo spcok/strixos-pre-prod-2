@@ -230,9 +230,7 @@ export default function Dashboard() {
     const parts = activeDate.split('-');
     if (parts.length !== 3) return;
     const [y, m, d] = parts.map(Number);
-    
-    // Create the date at 12:00:00 PM (Noon) to safely bypass Daylight Savings Time traps
-    const dateObj = new Date(y, m - 1, d, 12, 0, 0); 
+    const dateObj = new Date(y, m - 1, d);
     dateObj.setDate(dateObj.getDate() + days);
 
     const newDateString = dateObj.getFullYear() + '-' +
@@ -389,6 +387,7 @@ export default function Dashboard() {
           return (
             <div className="flex items-center justify-center gap-1 lg:gap-1.5 py-0.5 w-full">
               <Scale size={10} className="text-emerald-500 shrink-0 hidden lg:block" />
+              {/* FIXED FONT: Standardized to font-bold and text-[12px] to match the rest of the table */}
               <span className="text-[10px] md:text-[11px] lg:text-[12px] font-bold text-slate-700">
                 {formatWeightDisplay(w.weight_grams, preferredUnit)}
               </span>
@@ -548,6 +547,9 @@ export default function Dashboard() {
   const categories = useMemo(() => Array.from(new Set(allAnimals.map(a => a.category).filter(Boolean))).sort(), [allAnimals]);
   const tabs = [...categories, 'ARCHIVED']; 
 
+  // --- ADJUSTED COLUMN WIDTHS ---
+  // Decreased desktop name column from 140px/1.5fr to 120px/1.1fr
+  // Increased desktop weight column from 80px to 100px/0.8fr
   const tableGridCols = table.getVisibleLeafColumns().map(c => {
     if (c.id === 'name') return screen.isMobile ? 'minmax(90px, 1.2fr)' : screen.isTablet ? 'minmax(110px, 1.2fr)' : 'minmax(120px, 1.1fr)';
     if (c.id === 'species') return screen.isMobile || screen.isTablet ? 'minmax(70px, 0.8fr)' : 'minmax(90px, 0.8fr)';
@@ -576,9 +578,8 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {/* ISOLATED SEARCH BAR: Now safely hides on mobile landscape without taking the Date selector with it */}
-      <div className="w-full bg-slate-50/80 p-2 lg:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden lg:landscape:block">
-        <div className="relative w-full">
+      <div className="flex flex-col sm:flex-row gap-2 lg:gap-3 w-full bg-slate-50/80 p-2 lg:p-3 rounded-2xl border border-slate-200 shadow-inner portrait:flex landscape:hidden lg:landscape:flex">
+        <div className="relative w-full lg:w-96 shrink-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
           <input 
             type="text" 
@@ -588,31 +589,10 @@ export default function Dashboard() {
             className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs lg:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all shadow-sm placeholder:text-slate-400"
           />
         </div>
-      </div>
 
-      {/* NEW UNIFIED FILTERS ROW: Tabs and Date Picker sit side-by-side cleanly in all views */}
-      <div className="flex flex-col landscape:flex-row sm:flex-row justify-between items-stretch landscape:items-center sm:items-center gap-2 lg:gap-3 w-full shrink-0">
-        <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full landscape:w-auto sm:w-auto flex-1 gap-1.5">
-          {tabs.map(tab => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm flex items-center justify-center ${
-                activeTab === tab 
-                  ? tab === 'ARCHIVED' 
-                    ? 'bg-rose-500 text-white border border-rose-600 shadow-rose-500/20'
-                    : 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
-                  : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-        
-        <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full landscape:w-auto sm:w-auto shrink-0">
+        <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full lg:w-auto">
           <button onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronLeft size={16} /></button>
-          <div className="flex-1 landscape:flex-none sm:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[120px]">
+          <div className="flex-1 lg:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[120px]">
             <input 
               type="date" 
               value={inputDate}
@@ -623,6 +603,24 @@ export default function Dashboard() {
           </div>
           <button onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronRight size={16} /></button>
         </div>
+      </div>
+
+      <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full shrink-0 gap-1.5">
+        {tabs.map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm ${
+              activeTab === tab 
+                ? tab === 'ARCHIVED' 
+                  ? 'bg-rose-500 text-white border border-rose-600 shadow-rose-500/20'
+                  : 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+                : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
       </div>
       
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative mt-1">

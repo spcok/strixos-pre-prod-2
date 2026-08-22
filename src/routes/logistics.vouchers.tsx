@@ -5,32 +5,14 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { 
   Ticket, QrCode, Search, CheckCircle2, 
   XCircle, Clock, Loader2, Calendar, MoreVertical, 
-  Ban, Plus, Trash2, ShieldAlert, WifiOff, X, User, Check
+  Ban, Plus, Trash2, WifiOff, X
 } from 'lucide-react';
-import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { Scanner } from '@yudiel/react-qr-scanner';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
+import { Voucher } from '../types';
 
-type Voucher = {
-  id: string; 
-  voucher_code: string; 
-  experience_type: string;
-  item_name?: string;
-  purchaser_name: string;
-  purchaser_email: string;
-  participants: number;
-  guests: number;
-  status: 'ACTIVE' | 'REDEEMED' | 'CANCELLED' | 'EXPIRED';
-  purchase_date: string;
-  redeemed_at: string | null;
-  transaction_id: string;
-};
-
-// ------------------------------------------------------------------
-// 1. STRICT OFFLINE QUERY OPTIONS
-// ------------------------------------------------------------------
 const vouchersOptions = queryOptions({
   queryKey: ['vouchers'],
   queryFn: async () => {
@@ -48,9 +30,6 @@ const vouchersOptions = queryOptions({
   meta: { persist: true }
 });
 
-// ------------------------------------------------------------------
-// 2. ROUTE CONFIGURATION
-// ------------------------------------------------------------------
 export const Route = createFileRoute('/logistics/vouchers')({
   loader: async ({ context }: any) => {
     if (context?.queryClient) {
@@ -99,9 +78,6 @@ function useIsMobile() {
   return isMobile;
 }
 
-// ------------------------------------------------------------------
-// 3. MAIN COMPONENT
-// ------------------------------------------------------------------
 export function VouchersDashboard() {
   const queryClient = useQueryClient();
   const { user, profile, hasPermission } = useAuth();
@@ -110,16 +86,13 @@ export function VouchersDashboard() {
   
   const isManager = hasPermission('vouchers:manage') || ['DIRECTOR', 'ADMIN', 'MANAGER'].includes(profile?.role || '');
 
-  // High-Level Views: Dedicated Scanner View vs Dedicated Directory View
   const [activeViewTab, setActiveViewTab] = useState<'SCANNER' | 'DIRECTORY'>('SCANNER');
-
   const [manualCode, setManualCode] = useState('');
   const [filterStatus, setFilterStatus] = useState<'ALL' | 'ACTIVE' | 'REDEEMED' | 'EXPIRED' | 'CANCELLED'>('ACTIVE');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [isScannerPaused, setIsScannerPaused] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
-  // Issue Voucher Modal State
   const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
   const [issueForm, setIssueForm] = useState({
     customerName: '',
@@ -129,16 +102,13 @@ export function VouchersDashboard() {
     experiences: [{ id: crypto.randomUUID(), itemName: EXPERIENCE_OPTIONS[0], participants: 1, guests: 0 }]
   });
 
-  // Directory Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
-  // Flash Alerts
   const [successFlash, setSuccessFlash] = useState<{ show: boolean; voucherCode: string; participants: number; guests: number }>({ show: false, voucherCode: '', participants: 0, guests: 0 });
   const [errorFlash, setErrorFlash] = useState<{ show: boolean; message: string }>({ show: false, message: '' });
 
-  // Network State Listener
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -150,7 +120,6 @@ export function VouchersDashboard() {
     };
   }, []);
 
-  // Supabase Realtime Sync
   useEffect(() => {
     if (!isOnline) return;
 
@@ -186,7 +155,6 @@ export function VouchersDashboard() {
 
   const { data: vouchers = [], isLoading } = useQuery(vouchersOptions);
 
-  // --- MUTATIONS ---
   const issueMutation = useMutation({
     mutationFn: async (payload: typeof issueForm) => {
       const { data, error } = await supabase.functions.invoke('issue-manual-voucher', {
@@ -290,7 +258,6 @@ export function VouchersDashboard() {
     onError: (error: any) => toast.error(`Failed to update status: ${error.message}`)
   });
 
-  // --- SCAN & SUBMIT HANDLERS ---
   const handleScan = (detectedCodes: any[]) => {
     if (isScannerPaused || redeemMutation.isPending || !detectedCodes || detectedCodes.length === 0) return;
     const rawVal = detectedCodes[0]?.rawValue || detectedCodes[0]?.value || '';
@@ -339,7 +306,7 @@ export function VouchersDashboard() {
     return vouchers.filter(v => {
       const matchesStatus = filterStatus === 'ALL' || v.status === filterStatus;
       
-      const vDate = new Date(v.purchase_date);
+      const vDate = new Date(v.purchase_date || '');
       vDate.setHours(0, 0, 0, 0); 
       
       const start = startDate ? new Date(startDate) : null;
@@ -386,7 +353,7 @@ export function VouchersDashboard() {
   }
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 animate-in fade-in duration-300 w-full" onClick={() => setOpenMenuId(null)}>
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 animate-in fade-in duration-300 w-full font-sans" onClick={() => setOpenMenuId(null)}>
       
       {/* SUCCESS FLASH */}
       {successFlash.show && (
@@ -424,7 +391,7 @@ export function VouchersDashboard() {
         </div>
       )}
 
-      {/* --- HEADER RIBBON --- */}
+      {/* HEADER */}
       <div className="flex justify-between items-start w-full shrink-0">
         <div className="shrink-0 pr-4 flex flex-col gap-1">
            <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-none">
@@ -435,7 +402,6 @@ export function VouchersDashboard() {
            </p>
         </div>
         
-        {/* Issue Voucher: Desktop Only button */}
         {isManager && (
           <button 
             onClick={() => setIsIssueModalOpen(true)}
@@ -447,7 +413,7 @@ export function VouchersDashboard() {
         )}
       </div>
 
-      {/* --- HIGH-LEVEL VIEW TABS (Pill Style) --- */}
+      {/* VIEW TABS */}
       <div className="flex gap-2 w-full shrink-0">
         <button
           onClick={() => setActiveViewTab('SCANNER')}
@@ -479,17 +445,13 @@ export function VouchersDashboard() {
         )}
       </div>
 
-      {/* --- ACTIVE TAB VIEW --- */}
-
-      {/* 1. DYNAMICALLY AUTO-SCALED SCANNER (Viewport Fluid Clamping for Mobile & Tablets) */}
+      {/* SCANNER VIEW */}
       {activeViewTab === 'SCANNER' && (
         <div className="flex-1 flex flex-col justify-start items-center min-h-0 overflow-y-auto custom-scrollbar p-1">
           <div 
             className="w-full space-y-3 my-auto flex flex-col items-center"
             style={{ maxWidth: 'clamp(320px, 85vw, 480px)' }}
           >
-            
-            {/* Camera Scanner Box */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden w-full flex flex-col">
               <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50 flex items-center justify-between shrink-0">
                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-800 flex items-center gap-1.5">
@@ -503,7 +465,6 @@ export function VouchersDashboard() {
               </div>
               
               <div className="p-3 sm:p-4 bg-slate-50/40 flex items-center justify-center">
-                {/* Dynamically clamped scanner viewport */}
                 <div 
                   className="aspect-square rounded-2xl overflow-hidden bg-slate-900 relative shadow-inner flex items-center justify-center border-2 border-slate-200"
                   style={{
@@ -515,7 +476,7 @@ export function VouchersDashboard() {
                     onScan={handleScan}
                     paused={isScannerPaused || redeemMutation.isPending}
                     formats={['qr_code']} 
-                    components={{ audio: false, onOff: false, torch: true }}
+                    components={{ onOff: false, torch: true }}
                     styles={{ 
                       container: { width: '100%', height: '100%' }, 
                       video: { objectFit: 'cover', width: '100%', height: '100%' } 
@@ -530,7 +491,6 @@ export function VouchersDashboard() {
               </div>
             </div>
 
-            {/* Manual Validation Box */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden w-full flex flex-col">
               <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50 shrink-0">
                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-800 flex items-center gap-1.5">
@@ -565,11 +525,10 @@ export function VouchersDashboard() {
         </div>
       )}
 
-      {/* 2. DIRECTORY VIEW */}
+      {/* DIRECTORY VIEW */}
       {activeViewTab === 'DIRECTORY' && isManager && (
         <div className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col min-h-0">
           
-          {/* Controls Deck */}
           <div className="p-3.5 border-b border-slate-100 bg-slate-50/80 flex flex-col gap-3 shrink-0">
             <div className="flex flex-wrap gap-1.5 w-full">
               {STATUS_TABS.map((status) => (
@@ -617,10 +576,7 @@ export function VouchersDashboard() {
             </div>
           </div>
 
-          {/* Directory Scroll Body */}
           <div ref={scrollParentRef} className="flex-1 overflow-y-auto custom-scrollbar bg-slate-50/30">
-            
-            {/* Desktop Table Header */}
             <div 
               className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-20 backdrop-blur-md min-w-[960px]" 
               style={{ gridTemplateColumns: tableGridCols }}
@@ -642,7 +598,6 @@ export function VouchersDashboard() {
               <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2 p-8">
                 <Ticket size={36} className="opacity-20" />
                 <span className="text-xs font-black uppercase tracking-widest">No Vouchers Found</span>
-                {searchQuery && <span className="text-xs text-slate-500">No results matching "{searchQuery}"</span>}
               </div>
             ) : (
               <div 
@@ -658,11 +613,8 @@ export function VouchersDashboard() {
                       ref={rowVirtualizer.measureElement}
                       data-index={virtualRow.index}
                       className="absolute top-0 left-0 w-full transition-colors box-border"
-                      style={{ 
-                        transform: `translateY(${virtualRow.start}px)`
-                      }}
+                      style={{ transform: `translateY(${virtualRow.start}px)` }}
                     >
-                      {/* Tablet Portrait / Mobile Landscape / Mobile Cards */}
                       <div className="lg:hidden p-1.5">
                         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3 hover:border-slate-300 transition-all">
                           <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
@@ -732,14 +684,13 @@ export function VouchersDashboard() {
                             <div className="space-y-0.5 sm:col-span-2 md:col-span-1">
                               <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block">Purchase Date</span>
                               <p className="font-bold text-slate-700 flex items-center gap-1.5">
-                                <Calendar size={13} className="text-slate-400"/> {new Date(v.purchase_date).toLocaleDateString('en-GB')}
+                                <Calendar size={13} className="text-slate-400"/> {new Date(v.purchase_date || '').toLocaleDateString('en-GB')}
                               </p>
                             </div>
                           </div>
                         </div>
                       </div>
 
-                      {/* Desktop Row Layout */}
                       <div 
                         className="hidden lg:grid border-b border-slate-100 bg-white hover:bg-slate-50/80 transition-colors"
                         style={{ gridTemplateColumns: tableGridCols }}
@@ -766,7 +717,7 @@ export function VouchersDashboard() {
 
                         <div className="px-5 py-3.5 flex items-center justify-start min-w-0">
                           <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
-                            <Calendar size={12} className="text-slate-400 shrink-0"/> {new Date(v.purchase_date).toLocaleDateString('en-GB')}
+                            <Calendar size={12} className="text-slate-400 shrink-0"/> {new Date(v.purchase_date || '').toLocaleDateString('en-GB')}
                           </span>
                         </div>
 

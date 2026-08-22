@@ -1,439 +1,287 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { createFileRoute, Link } from '@tanstack/react-router';
-import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import React, { useState, useMemo } from 'react';
+import { createFileRoute } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
 import { 
-  AlertTriangle, CheckCircle2, Calendar, Search, 
-  Utensils, Scale, Eye, HeartPulse, 
-  Download, Loader2, ArrowRight, WifiOff 
+  ShieldAlert, ShieldCheck, ChevronLeft, ChevronRight, 
+  Calendar, Search, Loader2, Utensils, Scale, 
+  Droplets, Thermometer, Check, Plus
 } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
-import { toast } from 'sonner';
+import { 
+  format, startOfWeek, endOfWeek, eachDayOfInterval, 
+  addWeeks, subWeeks, isSameDay, isFuture 
+} from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
-import { reportExportService } from '../services/reportExportService';
+import { Animal, DailyLog, FeedingSchedule, WeightLog, TemperatureLog } from '../types';
+import { FeedModal } from '../components/husbandry/FeedModal';
+import { WeightModal } from '../components/husbandry/WeightModal';
+import { DailyLogFormModal } from '../components/animals/DailyLogFormModal';
+import { TemperatureModal } from '../components/husbandry/TemperatureModal';
 
-// ------------------------------------------------------------------
-// 1. STRICT OFFLINE QUERY OPTIONS
-// ------------------------------------------------------------------
-const missingRecordsDataOptions = queryOptions({
-  queryKey: ['missing_records_pool'],
-  queryFn: async () => {
-    const [animalsRes, logsRes, schedulesRes, prescriptionsRes] = await Promise.all([
-      supabase
-        .from('animals')
-        .select('*')
-        .neq('status', 'ARCHIVED')
-        .neq('status', 'DECEASED')
-        .order('name', { ascending: true }),
-      supabase
-        .from('daily_logs')
-        .select('*')
-        .order('log_date', { ascending: false }),
-      supabase
-        .from('feeding_schedules')
-        .select('*')
-        .eq('is_deleted', false),
-      supabase
-        .from('prescriptions')
-        .select('*')
-        .eq('status', 'ACTIVE')
-    ]);
-
-    if (animalsRes.error) throw animalsRes.error;
-
-    return {
-      animals: animalsRes.data || [],
-      logs: logsRes.data || [],
-      schedules: schedulesRes.data || [],
-      prescriptions: prescriptionsRes.data || []
-    };
-  },
-  staleTime: 1000 * 60 * 5,
-  gcTime: 1000 * 60 * 60 * 24 * 15,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
-});
-
-// @ts-ignore
 export const Route = createFileRoute('/husbandry/missing-records')({
-  loader: async ({ context }: any) => {
-    if (context?.queryClient) {
-      await context.queryClient.ensureQueryData(missingRecordsDataOptions);
-    }
-  },
-  component: MissingRecordsPage,
+  component: WeeklyComplianceAuditPage,
 });
 
-const CATEGORY_TABS = ['ALL', 'OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'] as const;
+const CATEGORIES = ['OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'] as const;
 
-function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const checkMobile = () => setIsMobile(window.innerWidth < 1024);
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-  return isMobile;
-}
+export function WeeklyComplianceAuditPage() {
+  const { profile } = useAuth();
+  
+  // Week State (Defaults to Current Week, Monday - Sunday)
+  const [currentWeekDate, setCurrentWeekDate] = useState<Date>(new Date());
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>(CATEGORIES[0]);
 
-export function MissingRecordsPage() {
-  const queryClient = useQueryClient();
-  const { profile, user } = useAuth();
-  const isMobile = useIsMobile();
-  const scrollParentRef = useRef<HTMLDivElement>(null);
-
-  const [selectedDate, setSelectedDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
-  const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [filterType, setFilterType] = useState<'ALL' | 'OBSERVATION' | 'FEEDING' | 'WEIGHT' | 'MEDICATION'>('ALL');
-  const [isExporting, setIsExporting] = useState(false);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
-
-  // Supabase Realtime Listener
-  useEffect(() => {
-    if (!isOnline) return;
-    const channel = supabase
-      .channel('missing-records-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_logs' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['missing_records_pool'] });
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [isOnline, queryClient]);
-
-  const { data: db, isLoading } = useQuery(missingRecordsDataOptions);
-
-  // ------------------------------------------------------------------
-  // AUDIT ENGINE
-  // ------------------------------------------------------------------
-  const auditedAnimals = useMemo(() => {
-    if (!db) return [];
-
-    const targetDateStr = selectedDate;
-    const targetDateObj = parseISO(targetDateStr);
-
-    return db.animals.map((animal: any) => {
-      // 1. Observation Logs
-      const logsForDay = db.logs.filter((l: any) => {
-        if (l.animal_id !== animal.id) return false;
-        const logDate = l.log_date ? l.log_date.split('T')[0] : '';
-        return logDate === targetDateStr;
-      });
-
-      const hasObservation = logsForDay.some((l: any) => l.log_type === 'OBSERVATION');
-
-      // 2. Feeding Logs
-      const hasFeedLog = logsForDay.some((l: any) => l.log_type === 'FEEDING');
-      const scheduledFeeds = db.schedules.filter(
-        (s: any) => s.animal_id === animal.id && s.scheduled_date === targetDateStr
-      );
-      const isFastingDay = scheduledFeeds.some(
-        (s: any) => s.notes === 'FAST DAY / NOT REQUIRED' || s.food_type === 'NOT REQUIRED'
-      );
-      const isFeedRequired = scheduledFeeds.length > 0 && !isFastingDay;
-      const missingFeed = isFeedRequired && !hasFeedLog;
-
-      // 3. Weight Logs (7-day window)
-      const recentWeightLogs = db.logs.filter((l: any) => {
-        if (l.animal_id !== animal.id || l.log_type !== 'WEIGHT' || !l.log_date) return false;
-        const logTime = new Date(l.log_date).getTime();
-        const targetTime = targetDateObj.getTime();
-        const diffDays = Math.abs((targetTime - logTime) / (1000 * 60 * 60 * 24));
-        return diffDays <= 7;
-      });
-      const missingWeight = recentWeightLogs.length === 0;
-
-      // 4. Prescriptions
-      const activeMeds = db.prescriptions.filter((p: any) => p.animal_id === animal.id);
-      const hasMedLog = logsForDay.some((l: any) => l.log_type === 'MEDICATION' || l.log_type === 'CLINICAL');
-      const missingMed = activeMeds.length > 0 && !hasMedLog;
-
-      const missingCount =
-        (!hasObservation ? 1 : 0) +
-        (missingFeed ? 1 : 0) +
-        (missingWeight ? 1 : 0) +
-        (missingMed ? 1 : 0);
-
-      return {
-        ...animal,
-        hasObservation,
-        missingObservation: !hasObservation,
-        hasFeedLog,
-        isFeedRequired,
-        isFastingDay,
-        missingFeed,
-        missingWeight,
-        activeMedsCount: activeMeds.length,
-        missingMed,
-        missingCount,
-        isFullyCompliant: missingCount === 0
-      };
-    });
-  }, [db, selectedDate]);
-
-  // Filtered List
-  const filteredList = useMemo(() => {
-    return auditedAnimals.filter((animal: any) => {
-      const inCategory = selectedCategory === 'ALL' || animal.category === selectedCategory;
-
-      const matchesSearch =
-        !searchQuery.trim() ||
-        animal.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        animal.species?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        animal.ring_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        animal.enclosure?.toLowerCase().includes(searchQuery.toLowerCase());
-
-      let matchesType = true;
-      if (filterType === 'OBSERVATION') matchesType = animal.missingObservation;
-      if (filterType === 'FEEDING') matchesType = animal.missingFeed;
-      if (filterType === 'WEIGHT') matchesType = animal.missingWeight;
-      if (filterType === 'MEDICATION') matchesType = animal.missingMed;
-
-      return inCategory && matchesSearch && matchesType && animal.missingCount > 0;
-    });
-  }, [auditedAnimals, selectedCategory, searchQuery, filterType]);
-
-  // Stats Breakdown
-  const stats = useMemo(() => {
-    const totalAnimals = auditedAnimals.length;
-    const compliantAnimals = auditedAnimals.filter((a: any) => a.isFullyCompliant).length;
-    const missingObservations = auditedAnimals.filter((a: any) => a.missingObservation).length;
-    const missingFeeds = auditedAnimals.filter((a: any) => a.missingFeed).length;
-    const missingWeights = auditedAnimals.filter((a: any) => a.missingWeight).length;
-    const missingMeds = auditedAnimals.filter((a: any) => a.missingMed).length;
-
-    const compliancePercent = totalAnimals > 0 ? Math.round((compliantAnimals / totalAnimals) * 100) : 100;
-
-    return {
-      totalAnimals,
-      compliantAnimals,
-      missingObservations,
-      missingFeeds,
-      missingWeights,
-      missingMeds,
-      compliancePercent
-    };
-  }, [auditedAnimals]);
-
-  const rowVirtualizer = useVirtualizer({
-    count: filteredList.length,
-    getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => (isMobile ? 190 : 72),
-    overscan: 5,
+  // Modal Control States
+  const [modalState, setModalState] = useState<{
+    type: 'FEED' | 'WEIGHT' | 'MISTING' | 'TEMP' | null;
+    animal: Animal | null;
+    date: string;
+  }>({
+    type: null,
+    animal: null,
+    date: format(new Date(), 'yyyy-MM-dd')
   });
 
-  const virtualItems = rowVirtualizer.getVirtualItems();
-  const tableGridCols = "minmax(220px, 1.6fr) minmax(130px, 0.9fr) minmax(280px, 2fr) minmax(130px, 0.9fr)";
+  const weekStart = startOfWeek(currentWeekDate, { weekStartsOn: 1 });
+  const weekEnd = endOfWeek(currentWeekDate, { weekStartsOn: 1 });
+  const daysInWeek = eachDayOfInterval({ start: weekStart, end: weekEnd });
 
-  const handleExportAudit = async () => {
-    if (!isOnline) {
-      toast.error('Exporting compliance reports requires an active network connection.');
-      return;
-    }
+  const weekStartStr = format(weekStart, 'yyyy-MM-dd');
+  const weekEndStr = format(weekEnd, 'yyyy-MM-dd');
 
-    setIsExporting(true);
-    try {
-      const headers = ['Animal Name', 'Species', 'Category', 'Enclosure', 'Missing Protocols'];
-      const exportRows = filteredList.map((a: any) => {
-        const issues = [];
-        if (a.missingObservation) issues.push('Daily Observation');
-        if (a.missingFeed) issues.push('Scheduled Feed');
-        if (a.missingWeight) issues.push('Weekly Weight Record');
-        if (a.missingMed) issues.push('Active Medication Administration');
+  // Supabase Weekly Data Query
+  const { data, isLoading } = useQuery({
+    queryKey: ['weekly_compliance_audit', weekStartStr, weekEndStr],
+    queryFn: async () => {
+      const [animalsRes, logsRes, feedsRes, weightsRes, tempsRes] = await Promise.all([
+        supabase
+          .from('animals')
+          .select('*')
+          .neq('status', 'ARCHIVED')
+          .neq('status', 'DECEASED')
+          .order('name', { ascending: true }),
+        supabase
+          .from('daily_logs')
+          .select('*')
+          .gte('log_date', `${weekStartStr}T00:00:00`)
+          .lte('log_date', `${weekEndStr}T23:59:59`),
+        supabase
+          .from('feeding_schedules')
+          .select('*')
+          .gte('scheduled_date', weekStartStr)
+          .lte('scheduled_date', weekEndStr)
+          .eq('is_deleted', false),
+        supabase
+          .from('weight_logs')
+          .select('*')
+          .gte('recorded_at', `${weekStartStr}T00:00:00`)
+          .lte('recorded_at', `${weekEndStr}T23:59:59`),
+        supabase
+          .from('temperature_logs')
+          .select('*')
+          .gte('recorded_at', `${weekStartStr}T00:00:00`)
+          .lte('recorded_at', `${weekEndStr}T23:59:59`)
+      ]);
 
-        return [
-          a.name,
-          a.species || '-',
-          a.category || '-',
-          a.enclosure || '-',
-          issues.join(', ') || 'Fully Compliant'
-        ];
+      if (animalsRes.error) throw animalsRes.error;
+
+      return {
+        animals: (animalsRes.data || []) as Animal[],
+        logs: (logsRes.data || []) as DailyLog[],
+        feeds: (feedsRes.data || []) as FeedingSchedule[],
+        weights: (weightsRes.data || []) as WeightLog[],
+        temps: (tempsRes.data || []) as TemperatureLog[]
+      };
+    },
+    staleTime: 1000 * 60 * 3,
+  });
+
+  // Calculate Grid Status per Animal
+  const { auditMatrix, overallStats } = useMemo(() => {
+    if (!data) return { auditMatrix: [], overallStats: { total: 0, compliantCount: 0, compliancePct: 100 } };
+
+    const { animals, logs, feeds, weights, temps } = data;
+    const today = new Date();
+
+    const matrix = animals.map(animal => {
+      const requiresTemp = animal.ambient_temp_only === false || animal.target_day_temp_c !== null || animal.category === 'EXOTIC';
+      const requiresMisting = animal.target_humidity_min_percent !== null || animal.category === 'EXOTIC';
+
+      // 7-day status arrays
+      const days = daysInWeek.map(day => {
+        const dateStr = format(day, 'yyyy-MM-dd');
+        const isFutureDay = isFuture(day) && !isSameDay(day, today);
+
+        // 1. Feeding Status
+        const feedSched = feeds.find(f => f.animal_id === animal.id && f.scheduled_date === dateStr);
+        const hasFeed = feedSched 
+          ? (feedSched.status === 'COMPLETED' || feedSched.status === 'FASTING') 
+          : logs.some(l => l.animal_id === animal.id && l.log_type === 'FEEDING' && Boolean(l.log_date?.startsWith(dateStr)));
+
+        // 2. Weight Status
+        const hasWeight = weights.some(w => w.animal_id === animal.id && Boolean(w.recorded_at?.startsWith(dateStr)));
+
+        // 3. Temp Status (if required)
+        const hasTemp = temps.some(t => t.animal_id === animal.id && Boolean(t.recorded_at?.startsWith(dateStr))) 
+          || logs.some(l => l.animal_id === animal.id && l.log_type === 'TEMPERATURE' && Boolean(l.log_date?.startsWith(dateStr)));
+
+        // 4. Misting Status (if required)
+        const hasMisting = logs.some(l => 
+          l.animal_id === animal.id && 
+          ((l.log_type as string) === 'MISTING' || (l.log_type as string) === 'HUMIDITY' || (l.notes && l.notes.toLowerCase().includes('mist'))) && 
+          Boolean(l.log_date?.startsWith(dateStr))
+        );
+
+        return {
+          date: day,
+          dateStr,
+          isFutureDay,
+          hasFeed,
+          hasWeight,
+          hasTemp,
+          hasMisting,
+        };
       });
 
-      await reportExportService.exportSingleReport(
-        {
-          title: `Husbandry Non-Compliance Audit - ${format(parseISO(selectedDate), 'dd MMM yyyy')}`,
-          dateRange: `Audit Date: ${format(parseISO(selectedDate), 'dd MMM yyyy')}`,
-          generatorName: profile?.name || user?.email || 'Compliance Officer',
-          columns: headers,
-          data: exportRows
-        },
-        'missing_records_audit'
-      );
-      toast.success('Audit report exported successfully.');
-    } catch (err: any) {
-      toast.error(`Export failed: ${err.message || 'Error compiling audit document'}`);
-    } finally {
-      setIsExporting(false);
-    }
-  };
+      const pastDays = days.filter(d => !d.isFutureDay);
+      const checksPerDay = 1 + (requiresTemp ? 1 : 0) + (requiresMisting ? 1 : 0);
+      const totalChecksRequired = pastDays.length * checksPerDay + 1; // +1 for weekly weight
+      
+      let checksCompleted = 0;
+      pastDays.forEach(d => {
+        if (d.hasFeed) checksCompleted++;
+        if (requiresTemp && d.hasTemp) checksCompleted++;
+        if (requiresMisting && d.hasMisting) checksCompleted++;
+      });
+      const hasWeeklyWeight = days.some(d => d.hasWeight);
+      if (hasWeeklyWeight) checksCompleted++;
+
+      const animalCompliancePct = totalChecksRequired > 0 
+        ? Math.round((checksCompleted / totalChecksRequired) * 100) 
+        : 100;
+
+      const isFullyCompliant = animalCompliancePct >= 100;
+
+      return {
+        animal,
+        requiresTemp,
+        requiresMisting,
+        days,
+        hasWeeklyWeight,
+        animalCompliancePct,
+        isFullyCompliant
+      };
+    });
+
+    const compliantCount = matrix.filter(m => m.isFullyCompliant).length;
+    const compliancePct = matrix.length > 0 ? Math.round((compliantCount / matrix.length) * 100) : 100;
+
+    return {
+      auditMatrix: matrix,
+      overallStats: {
+        total: matrix.length,
+        compliantCount,
+        compliancePct
+      }
+    };
+  }, [data, daysInWeek]);
+
+  const filteredMatrix = useMemo(() => {
+    return auditMatrix.filter(row => {
+      const matchesCategory = row.animal.category === selectedCategory;
+      const q = searchQuery.toLowerCase();
+      const matchesSearch = !q ||
+        row.animal.name.toLowerCase().includes(q) ||
+        (row.animal.species || '').toLowerCase().includes(q) ||
+        (row.animal.location || '').toLowerCase().includes(q) ||
+        (row.animal.ring_number || '').toLowerCase().includes(q);
+
+      return matchesCategory && matchesSearch;
+    });
+  }, [auditMatrix, selectedCategory, searchQuery]);
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-4 animate-in fade-in duration-300 w-full font-sans">
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3.5 animate-in fade-in duration-300 w-full font-sans">
       
-      {/* HEADER RIBBON */}
-      <div className="flex justify-between items-start w-full mb-1 shrink-0">
-        <div className="shrink-0 pr-4 flex flex-col gap-1">
-          <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-none flex items-center gap-2.5">
-            <AlertTriangle className="text-amber-600" size={22} />
-            Missing Records & Non-Compliance Audit
+      {/* Header & Week Selector Ribbon */}
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 shrink-0 pb-1">
+        <div className="flex flex-col space-y-0.5">
+          <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight leading-tight flex items-center gap-2.5">
+            Weekly ZLA Compliance Matrix
           </h1>
           <p className="text-[10px] lg:text-xs text-slate-500 font-bold uppercase tracking-widest">
-            Statutory Zoo Licensing Act (ZLA) Daily Protocol & Observation Verification
+            Statutory Zoo Licensing Act 7-Day Husbandry, Dietary, Temp & Misting Audit
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {!isOnline && (
-            <span className="text-[10px] font-bold text-amber-600 flex items-center gap-1 bg-amber-50 px-2.5 py-1 rounded-xl border border-amber-200">
-              <WifiOff size={12} /> Offline
-            </span>
-          )}
+        {/* Week Navigator Controls */}
+        <div className="flex items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
+          <div className="flex items-center bg-white rounded-2xl p-1 border border-slate-200 shadow-sm">
+            <button
+              onClick={() => setCurrentWeekDate(prev => subWeeks(prev, 1))}
+              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+              title="Previous Week"
+            >
+              <ChevronLeft size={16} />
+            </button>
+
+            <div className="px-3 py-1 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-800">
+              <Calendar size={13} className="text-slate-500" />
+              <span>{format(weekStart, 'dd MMM')} – {format(weekEnd, 'dd MMM yyyy')}</span>
+            </div>
+
+            <button
+              onClick={() => setCurrentWeekDate(prev => addWeeks(prev, 1))}
+              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+              title="Next Week"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+
           <button
-            onClick={handleExportAudit}
-            disabled={isExporting || isLoading || filteredList.length === 0}
-            className="flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-sm active:scale-95 shrink-0"
+            onClick={() => setCurrentWeekDate(new Date())}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
           >
-            {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="text-emerald-400" />}
-            <span>Export Audit .DOCX</span>
+            Current Week
           </button>
+
+          <span className={`px-3 py-2 rounded-xl text-xs font-black uppercase tracking-widest border shadow-sm ${
+            overallStats.compliancePct >= 90
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+              : overallStats.compliancePct >= 70
+              ? 'bg-amber-50 text-amber-800 border-amber-200'
+              : 'bg-rose-50 text-rose-800 border-rose-200'
+          }`}>
+            {overallStats.compliancePct}% Compliant
+          </span>
         </div>
       </div>
 
-      {/* STATS OVERVIEW CARDS */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 shrink-0">
-        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Daily Compliance</span>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className={`text-2xl font-black ${stats.compliancePercent >= 90 ? 'text-emerald-600' : stats.compliancePercent >= 70 ? 'text-amber-600' : 'text-rose-600'}`}>
-              {stats.compliancePercent}%
-            </span>
-            <span className="text-[10px] font-bold text-slate-400">
-              {stats.compliantAnimals}/{stats.totalAnimals}
-            </span>
-          </div>
-        </div>
-
-        <div 
-          onClick={() => setFilterType(filterType === 'OBSERVATION' ? 'ALL' : 'OBSERVATION')}
-          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
-            filterType === 'OBSERVATION' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'OBSERVATION' ? 'text-slate-300' : 'text-slate-400'}`}>
-              Observations
-            </span>
-            <Eye size={13} className={filterType === 'OBSERVATION' ? 'text-emerald-400' : 'text-slate-400'} />
-          </div>
-          <p className="text-xl font-black mt-2">{stats.missingObservations}</p>
-        </div>
-
-        <div 
-          onClick={() => setFilterType(filterType === 'FEEDING' ? 'ALL' : 'FEEDING')}
-          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
-            filterType === 'FEEDING' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'FEEDING' ? 'text-slate-300' : 'text-slate-400'}`}>
-              Feed Logs
-            </span>
-            <Utensils size={13} className={filterType === 'FEEDING' ? 'text-amber-400' : 'text-slate-400'} />
-          </div>
-          <p className="text-xl font-black mt-2">{stats.missingFeeds}</p>
-        </div>
-
-        <div 
-          onClick={() => setFilterType(filterType === 'WEIGHT' ? 'ALL' : 'WEIGHT')}
-          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
-            filterType === 'WEIGHT' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'WEIGHT' ? 'text-slate-300' : 'text-slate-400'}`}>
-              7-Day Weights
-            </span>
-            <Scale size={13} className={filterType === 'WEIGHT' ? 'text-blue-400' : 'text-slate-400'} />
-          </div>
-          <p className="text-xl font-black mt-2">{stats.missingWeights}</p>
-        </div>
-
-        <div 
-          onClick={() => setFilterType(filterType === 'MEDICATION' ? 'ALL' : 'MEDICATION')}
-          className={`p-3.5 rounded-2xl border transition-all cursor-pointer shadow-sm flex flex-col justify-between ${
-            filterType === 'MEDICATION' ? 'bg-slate-900 text-white border-slate-800' : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <span className={`text-[9px] font-black uppercase tracking-widest ${filterType === 'MEDICATION' ? 'text-slate-300' : 'text-slate-400'}`}>
-              Clinical MARs
-            </span>
-            <HeartPulse size={13} className={filterType === 'MEDICATION' ? 'text-rose-400' : 'text-slate-400'} />
-          </div>
-          <p className="text-xl font-black mt-2">{stats.missingMeds}</p>
-        </div>
-
-        <div className="bg-amber-50 border border-amber-200 p-3.5 rounded-2xl shadow-sm flex flex-col justify-between">
-          <span className="text-[9px] font-black uppercase tracking-widest text-amber-800">Total Flagged</span>
-          <div className="mt-2 flex items-baseline gap-1.5">
-            <span className="text-2xl font-black text-amber-900">{filteredList.length}</span>
-            <span className="text-[10px] font-bold text-amber-700">Animals</span>
-          </div>
-        </div>
-      </div>
-
-      {/* FILTER & DATE CONTROLS */}
+      {/* Control Bar: Categories & Search */}
       <div className="bg-slate-50/90 p-3 rounded-2xl border border-slate-200 shadow-inner flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
-          <div className="flex items-center bg-white rounded-xl px-3 py-1.5 border border-slate-200 shadow-sm gap-2">
-            <Calendar size={13} className="text-slate-400 shrink-0" />
-            <input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="bg-transparent text-xs font-bold text-slate-800 border-none outline-none cursor-pointer p-0"
-            />
-          </div>
-
-          <div className="flex gap-1 overflow-x-auto custom-scrollbar">
-            {CATEGORY_TABS.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setSelectedCategory(cat)}
-                className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm ${
-                  selectedCategory === cat
-                    ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
-                    : 'bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-700 border border-slate-200'
-                }`}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
+        <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar w-full sm:w-auto">
+          {CATEGORIES.map(cat => (
+            <button
+              key={cat}
+              onClick={() => setSelectedCategory(cat)}
+              className={`px-3.5 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm ${
+                selectedCategory === cat
+                  ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
+                  : 'bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-700 border border-slate-200'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
         </div>
 
-        <div className="relative w-full sm:w-64">
+        <div className="relative w-full sm:w-64 shrink-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-3.5 h-3.5" />
           <input
             type="text"
-            placeholder="Search name, ring, enclosure..."
+            placeholder="Search specimen, location..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl font-medium focus:ring-2 focus:ring-slate-900 outline-none shadow-sm"
@@ -441,164 +289,262 @@ export function MissingRecordsPage() {
         </div>
       </div>
 
-      {/* AUDIT RESULTS GRID */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-1 min-h-0 overflow-hidden relative">
-        {isLoading && (
-          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-20 flex items-center justify-center rounded-2xl">
-            <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center gap-3 border border-slate-100">
-              <Loader2 className="animate-spin text-slate-600" size={24} />
-              <span className="text-sm font-bold text-slate-700">Auditing Statutory Husbandry Records...</span>
+      {/* Main 7-Day Compliance Grid */}
+      <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-0">
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 bg-slate-50/30 space-y-4">
+          
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-3">
+              <Loader2 size={24} className="animate-spin text-slate-600" />
+              <span className="text-xs font-black uppercase tracking-widest text-slate-600">
+                Compiling 7-Day Statutory Matrix...
+              </span>
             </div>
-          </div>
-        )}
-
-        <div ref={scrollParentRef} className="flex-1 overflow-y-auto custom-scrollbar bg-slate-50/30">
-          <div 
-            className="hidden lg:grid border-b border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-10 backdrop-blur-md min-w-[800px]"
-            style={{ gridTemplateColumns: tableGridCols }}
-          >
-            <div className="px-5 py-3.5 flex items-center justify-start text-left">Animal & Species</div>
-            <div className="px-5 py-3.5 flex items-center justify-start text-left">Enclosure</div>
-            <div className="px-5 py-3.5 flex items-center justify-start text-left">Outstanding Protocols</div>
-            <div className="px-5 py-3.5 flex items-center justify-end text-right">Direct Action</div>
-          </div>
-
-          {filteredList.length === 0 && !isLoading ? (
-            <div className="p-12 text-center text-slate-500 flex flex-col items-center justify-center h-full">
-              <div className="w-14 h-14 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-center mb-3 shadow-sm">
-                <CheckCircle2 size={28} className="text-emerald-600" />
-              </div>
-              <h3 className="font-black text-slate-900 uppercase tracking-tight text-sm">Full Protocol Compliance</h3>
-              <p className="text-xs font-medium text-slate-500 mt-1 max-w-sm">
-                All daily observations, scheduled feeds, and active medical logs for this date have been logged in accordance with ZLA standards.
-              </p>
+          ) : filteredMatrix.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2 p-8">
+              <ShieldCheck size={40} className="text-emerald-500 opacity-80" />
+              <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">No Specimens Found</h3>
+              <p className="text-xs text-slate-500 font-medium">No specimens found in this category matching your search criteria.</p>
             </div>
           ) : (
-            <div 
-              className="p-3 lg:p-0 min-w-full lg:min-w-[800px]"
-              style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: 'relative' }}
-            >
-              {virtualItems.map((virtualRow) => {
-                const animal = filteredList[virtualRow.index];
-
-                return (
-                  <div
-                    key={animal.id}
-                    ref={rowVirtualizer.measureElement}
-                    data-index={virtualRow.index}
-                    className="absolute top-0 left-0 w-full transition-colors box-border"
-                    style={{ transform: `translateY(${virtualRow.start}px)` }}
-                  >
-                    {/* Mobile / Tablet Card */}
-                    <div className="lg:hidden p-1.5">
-                      <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3">
-                        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-                          <div>
-                            <h4 className="font-black text-slate-900 text-sm">{animal.name}</h4>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{animal.species}</p>
-                          </div>
-                          <span className="px-2.5 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-slate-100 text-slate-700 border border-slate-200">
-                            {animal.enclosure || 'No Enclosure'}
-                          </span>
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block">Missing Requirements:</span>
-                          <div className="flex flex-wrap gap-1.5">
-                            {animal.missingObservation && (
-                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
-                                <Eye size={11} /> Observation Log
-                              </span>
-                            )}
-                            {animal.missingFeed && (
-                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
-                                <Utensils size={11} /> Scheduled Feed
-                              </span>
-                            )}
-                            {animal.missingWeight && (
-                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
-                                <Scale size={11} /> Weekly Weight
-                              </span>
-                            )}
-                            {animal.missingMed && (
-                              <span className="px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
-                                <HeartPulse size={11} /> Active Medication
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="pt-2 border-t border-slate-100 flex justify-end">
-                          <Link
-                            to={'/husbandry/daily-logs' as any}
-                            search={{ animalId: animal.id } as any}
-                            className="text-xs font-black uppercase tracking-widest text-slate-900 hover:text-slate-700 flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-xl transition-all"
-                          >
-                            <span>Log Protocols</span>
-                            <ArrowRight size={13} />
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Desktop Row */}
-                    <div 
-                      className="hidden lg:grid border-b border-slate-100 bg-white hover:bg-slate-50/80 transition-colors"
-                      style={{ gridTemplateColumns: tableGridCols }}
-                    >
-                      <div className="px-5 py-3.5 flex flex-col justify-center min-w-0">
-                        <h4 className="text-xs font-bold text-slate-900 truncate">{animal.name}</h4>
-                        <p className="text-[10px] text-slate-400 font-medium truncate">{animal.species}</p>
-                      </div>
-
-                      <div className="px-5 py-3.5 flex items-center justify-start min-w-0">
-                        <span className="text-xs font-bold text-slate-700">{animal.enclosure || '-'}</span>
-                      </div>
-
-                      <div className="px-5 py-3.5 flex items-center gap-1.5 flex-wrap min-w-0">
-                        {animal.missingObservation && (
-                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
-                            <Eye size={10} /> Observation
-                          </span>
-                        )}
-                        {animal.missingFeed && (
-                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
-                            <Utensils size={10} /> Feed Log
-                          </span>
-                        )}
-                        {animal.missingWeight && (
-                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
-                            <Scale size={10} /> Weight (7d)
-                          </span>
-                        )}
-                        {animal.missingMed && (
-                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
-                            <HeartPulse size={10} /> Medical MAR
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="px-5 py-3.5 flex items-center justify-end min-w-0">
-                        <Link
-                          to={'/husbandry/daily-logs' as any}
-                          search={{ animalId: animal.id } as any}
-                          className="text-[10px] font-black uppercase tracking-widest text-slate-900 hover:text-white hover:bg-slate-900 border border-slate-200 px-3 py-1.5 rounded-xl transition-all shadow-sm flex items-center gap-1"
-                        >
-                          <span>Log Now</span>
-                          <ArrowRight size={12} />
-                        </Link>
-                      </div>
-                    </div>
+            filteredMatrix.map(({ animal, requiresTemp, requiresMisting, days, hasWeeklyWeight, animalCompliancePct }) => (
+              <div 
+                key={animal.id}
+                className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm hover:border-slate-300 transition-all flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4"
+              >
+                {/* Animal Specimen Details (Left Side) */}
+                <div className="w-full lg:w-64 shrink-0 space-y-1">
+                  <div className="flex items-center justify-between lg:justify-start gap-2">
+                    <h3 className="text-sm font-black text-slate-900 tracking-tight">{animal.name}</h3>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest bg-slate-100 text-slate-700 border border-slate-200">
+                      {animal.location || 'Enclosure'}
+                    </span>
                   </div>
-                );
-              })}
-            </div>
+                  <p className="text-[11px] text-slate-500 font-medium truncate">
+                    {animal.species || animal.category} {animal.ring_number ? `• ${animal.ring_number}` : ''}
+                  </p>
+                  
+                  {/* Specimen Compliance Pill */}
+                  <div className="pt-1 flex flex-wrap items-center gap-1.5">
+                    <span className={`px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-widest border ${
+                      animalCompliancePct >= 100 
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                        : animalCompliancePct >= 70
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}>
+                      {animalCompliancePct}% Audit Score
+                    </span>
+                    {requiresTemp && (
+                      <span className="text-[9px] font-black text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200">
+                        Temp Tracked
+                      </span>
+                    )}
+                    {requiresMisting && (
+                      <span className="text-[9px] font-black text-cyan-700 bg-cyan-50 px-1.5 py-0.5 rounded border border-cyan-200">
+                        Misting Tracked
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 7-Day Pill Matrix Rows (Right Side) */}
+                <div className="w-full flex-1">
+                  <div className="w-full space-y-1.5 sm:space-y-2">
+                    
+                    {/* Day Column Header */}
+                    <div className="grid grid-cols-8 gap-1 sm:gap-1.5 text-center pb-1 border-b border-slate-100 items-center">
+                      <div className="text-[8px] sm:text-[10px] lg:text-xs font-black uppercase tracking-tight sm:tracking-widest text-slate-400 text-left truncate">Protocol</div>
+                      {days.map(d => (
+                        <div key={d.dateStr} className="text-[8px] sm:text-[10px] lg:text-xs font-black uppercase tracking-tight sm:tracking-widest text-slate-500">
+                          <span className="hidden sm:inline">{format(d.date, 'EEE dd')}</span>
+                          <span className="sm:hidden">{format(d.date, 'EE d')}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Row 1: Diet / Feeding Log (Required Daily) */}
+                    <div className="grid grid-cols-8 gap-1 sm:gap-1.5 items-center">
+                      <div className="flex items-center gap-1 text-[9px] sm:text-[10px] lg:text-xs font-bold text-slate-700 min-w-0">
+                        <Utensils size={12} className="text-amber-500 shrink-0" />
+                        <span className="truncate">Feeding</span>
+                      </div>
+                      {days.map(d => (
+                        <button
+                          key={d.dateStr}
+                          disabled={d.isFutureDay}
+                          onClick={() => setModalState({ type: 'FEED', animal, date: d.dateStr })}
+                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                            d.isFutureDay
+                              ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
+                              : d.hasFeed
+                              ? 'bg-amber-500 text-white border-amber-600 shadow-sm'
+                              : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100 border-dashed'
+                          }`}
+                          title={d.hasFeed ? `Diet recorded on ${d.dateStr}` : `Log feeding for ${d.dateStr}`}
+                        >
+                          {d.hasFeed ? (
+                            <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                          ) : d.isFutureDay ? (
+                            '-'
+                          ) : (
+                            <Plus className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Row 2: Weekly Weight Verification (Min 1x per week) */}
+                    <div className="grid grid-cols-8 gap-1 sm:gap-1.5 items-center">
+                      <div className="flex items-center gap-1 text-[9px] sm:text-[10px] lg:text-xs font-bold text-slate-700 min-w-0">
+                        <Scale size={12} className="text-blue-500 shrink-0" />
+                        <span className="truncate">Weight</span>
+                      </div>
+                      {days.map(d => (
+                        <button
+                          key={d.dateStr}
+                          disabled={d.isFutureDay}
+                          onClick={() => setModalState({ type: 'WEIGHT', animal, date: d.dateStr })}
+                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                            d.isFutureDay
+                              ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
+                              : d.hasWeight
+                              ? 'bg-blue-500 text-white border-blue-600 shadow-sm'
+                              : hasWeeklyWeight
+                              ? 'bg-slate-100 text-slate-400 border-slate-200 hover:bg-slate-200'
+                              : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100 border-dashed'
+                          }`}
+                          title={d.hasWeight ? `Weight recorded on ${d.dateStr}` : `Record weight on ${d.dateStr}`}
+                        >
+                          {d.hasWeight ? (
+                            <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                          ) : d.isFutureDay ? (
+                            '-'
+                          ) : (
+                            <Plus className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Row 3: Temp (Conditional) */}
+                    {requiresTemp && (
+                      <div className="grid grid-cols-8 gap-1 sm:gap-1.5 items-center">
+                        <div className="flex items-center gap-1 text-[9px] sm:text-[10px] lg:text-xs font-bold text-slate-700 min-w-0">
+                          <Thermometer size={12} className="text-purple-500 shrink-0" />
+                          <span className="truncate">Temp</span>
+                        </div>
+                        {days.map(d => (
+                          <button
+                            key={d.dateStr}
+                            disabled={d.isFutureDay}
+                            onClick={() => setModalState({ type: 'TEMP', animal, date: d.dateStr })}
+                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                              d.isFutureDay
+                                ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
+                                : d.hasTemp
+                                ? 'bg-purple-500 text-white border-purple-600 shadow-sm'
+                                : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100 border-dashed'
+                            }`}
+                            title={d.hasTemp ? `Temp recorded on ${d.dateStr}` : `Log temp check on ${d.dateStr}`}
+                          >
+                            {d.hasTemp ? (
+                              <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                            ) : d.isFutureDay ? (
+                              '-'
+                            ) : (
+                              <Plus className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Row 4: Misting (Conditional) */}
+                    {requiresMisting && (
+                      <div className="grid grid-cols-8 gap-1 sm:gap-1.5 items-center">
+                        <div className="flex items-center gap-1 text-[9px] sm:text-[10px] lg:text-xs font-bold text-slate-700 min-w-0">
+                          <Droplets size={12} className="text-cyan-500 shrink-0" />
+                          <span className="truncate">Misting</span>
+                        </div>
+                        {days.map(d => (
+                          <button
+                            key={d.dateStr}
+                            disabled={d.isFutureDay}
+                            onClick={() => setModalState({ type: 'MISTING', animal, date: d.dateStr })}
+                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                              d.isFutureDay
+                                ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
+                                : d.hasMisting
+                                ? 'bg-cyan-500 text-white border-cyan-600 shadow-sm'
+                                : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100 border-dashed'
+                            }`}
+                            title={d.hasMisting ? `Misting recorded on ${d.dateStr}` : `Log misting for ${d.dateStr}`}
+                          >
+                            {d.hasMisting ? (
+                              <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                            ) : d.isFutureDay ? (
+                              '-'
+                            ) : (
+                              <Plus className="w-3 h-3 sm:w-3.5 sm:h-3.5 lg:w-4 lg:h-4" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                  </div>
+                </div>
+              </div>
+            ))
           )}
+
         </div>
       </div>
+
+      {/* Interactive Modal Invocations */}
+      {modalState.animal && (
+        <>
+          {modalState.type === 'FEED' && (
+            <FeedModal
+              isOpen={true}
+              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              animalId={modalState.animal.id}
+              selectedDate={modalState.date}
+            />
+          )}
+
+          {modalState.type === 'WEIGHT' && (
+            <WeightModal
+              isOpen={true}
+              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              animalId={modalState.animal.id}
+              selectedDate={modalState.date}
+            />
+          )}
+
+          {modalState.type === 'TEMP' && (
+            <TemperatureModal
+              isOpen={true}
+              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              animalId={modalState.animal.id}
+              selectedDate={modalState.date}
+            />
+          )}
+
+          {modalState.type === 'MISTING' && (
+            <DailyLogFormModal
+              isOpen={true}
+              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              animal={modalState.animal}
+              defaultType="MISTING"
+            />
+          )}
+        </>
+      )}
 
     </div>
   );
 }
 
-export default MissingRecordsPage;
+export default WeeklyComplianceAuditPage;
