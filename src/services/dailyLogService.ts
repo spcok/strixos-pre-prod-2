@@ -99,4 +99,4 @@ export const dailyLogService = {
     if (error) throw error;
     return data;
   }
-};
+}; 

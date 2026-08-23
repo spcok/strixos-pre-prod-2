@@ -419,4 +419,4 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
       </div>
     </div>
   );
-}
+} 
