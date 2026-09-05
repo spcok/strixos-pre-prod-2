@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { 
   ShieldAlert, ShieldCheck, ChevronLeft, ChevronRight, 
   Calendar, Search, Loader2, Utensils, Scale, 
@@ -26,6 +26,7 @@ const CATEGORIES = ['OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'] as const;
 
 export function WeeklyComplianceAuditPage() {
   const { profile } = useAuth();
+  const queryClient = useQueryClient();
   
   // Week State (Defaults to Current Week, Monday - Sunday)
   const [currentWeekDate, setCurrentWeekDate] = useState<Date>(new Date());
@@ -43,6 +44,11 @@ export function WeeklyComplianceAuditPage() {
     date: format(new Date(), 'yyyy-MM-dd')
   });
 
+  const closeModal = () => {
+    setModalState({ type: null, animal: null, date: '' });
+    queryClient.invalidateQueries({ queryKey: ['weekly_compliance_audit'] });
+  };
+
   const weekStart = startOfWeek(currentWeekDate, { weekStartsOn: 1 });
   const weekEnd = endOfWeek(currentWeekDate, { weekStartsOn: 1 });
   const daysInWeek = eachDayOfInterval({ start: weekStart, end: weekEnd });
@@ -50,11 +56,11 @@ export function WeeklyComplianceAuditPage() {
   const weekStartStr = format(weekStart, 'yyyy-MM-dd');
   const weekEndStr = format(weekEnd, 'yyyy-MM-dd');
 
-  // Supabase Weekly Data Query
+  // Supabase Weekly Data Query (Now includes feed_logs)
   const { data, isLoading } = useQuery({
     queryKey: ['weekly_compliance_audit', weekStartStr, weekEndStr],
     queryFn: async () => {
-      const [animalsRes, logsRes, feedsRes, weightsRes, tempsRes] = await Promise.all([
+      const [animalsRes, logsRes, feedsRes, weightsRes, tempsRes, feedLogsRes] = await Promise.all([
         supabase
           .from('animals')
           .select('*')
@@ -81,7 +87,12 @@ export function WeeklyComplianceAuditPage() {
           .from('temperature_logs')
           .select('*')
           .gte('recorded_at', `${weekStartStr}T00:00:00`)
-          .lte('recorded_at', `${weekEndStr}T23:59:59`)
+          .lte('recorded_at', `${weekEndStr}T23:59:59`),
+        supabase
+          .from('feed_logs')
+          .select('*')
+          .gte('recorded_at', `${weekStartStr}T00:00:00`)
+          .lte('recorded_at', `${weekEndStr}T23:59:59`),
       ]);
 
       if (animalsRes.error) throw animalsRes.error;
@@ -91,7 +102,8 @@ export function WeeklyComplianceAuditPage() {
         logs: (logsRes.data || []) as DailyLog[],
         feeds: (feedsRes.data || []) as FeedingSchedule[],
         weights: (weightsRes.data || []) as WeightLog[],
-        temps: (tempsRes.data || []) as TemperatureLog[]
+        temps: (tempsRes.data || []) as TemperatureLog[],
+        feedLogs: (feedLogsRes.data || []) as any[],
       };
     },
     staleTime: 1000 * 60 * 3,
@@ -101,7 +113,7 @@ export function WeeklyComplianceAuditPage() {
   const { auditMatrix, overallStats } = useMemo(() => {
     if (!data) return { auditMatrix: [], overallStats: { total: 0, compliantCount: 0, compliancePct: 100 } };
 
-    const { animals, logs, feeds, weights, temps } = data;
+    const { animals, logs, feeds, weights, temps, feedLogs = [] } = data;
     const today = new Date();
 
     const matrix = animals.map(animal => {
@@ -113,11 +125,17 @@ export function WeeklyComplianceAuditPage() {
         const dateStr = format(day, 'yyyy-MM-dd');
         const isFutureDay = isFuture(day) && !isSameDay(day, today);
 
-        // 1. Feeding Status
+        // 1. Feeding Status (Checks feed_logs, feeding_schedules, and legacy daily_logs)
+        const hasFeedLog = feedLogs.some(f => 
+          f.animal_id === animal.id && 
+          !f.is_deleted && 
+          Boolean(f.recorded_at?.startsWith(dateStr))
+        );
         const feedSched = feeds.find(f => f.animal_id === animal.id && f.scheduled_date === dateStr);
-        const hasFeed = feedSched 
-          ? (feedSched.status === 'COMPLETED' || feedSched.status === 'FASTING') 
-          : logs.some(l => l.animal_id === animal.id && l.log_type === 'FEEDING' && Boolean(l.log_date?.startsWith(dateStr)));
+        const hasFeed = hasFeedLog 
+          || (feedSched 
+            ? (feedSched.status === 'COMPLETED' || feedSched.status === 'FASTING') 
+            : logs.some(l => l.animal_id === animal.id && l.log_type === 'FEEDING' && Boolean(l.log_date?.startsWith(dateStr))));
 
         // 2. Weight Status
         const hasWeight = weights.some(w => w.animal_id === animal.id && Boolean(w.recorded_at?.startsWith(dateStr)));
@@ -211,7 +229,7 @@ export function WeeklyComplianceAuditPage() {
             Weekly ZLA Compliance Matrix
           </h1>
           <p className="text-[10px] lg:text-xs text-slate-500 font-bold uppercase tracking-widest">
-            Statutory Zoo Licensing Act 7-Day Husbandry, Dietary, Temp & Misting Audit
+            Statutory Zoo Licensing Act 7-Day Husbandry, Dietary, Temp &amp; Misting Audit
           </p>
         </div>
 
@@ -220,7 +238,7 @@ export function WeeklyComplianceAuditPage() {
           <div className="flex items-center bg-white rounded-2xl p-1 border border-slate-200 shadow-sm">
             <button
               onClick={() => setCurrentWeekDate(prev => subWeeks(prev, 1))}
-              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
               title="Previous Week"
             >
               <ChevronLeft size={16} />
@@ -233,7 +251,7 @@ export function WeeklyComplianceAuditPage() {
 
             <button
               onClick={() => setCurrentWeekDate(prev => addWeeks(prev, 1))}
-              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all"
+              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
               title="Next Week"
             >
               <ChevronRight size={16} />
@@ -242,7 +260,7 @@ export function WeeklyComplianceAuditPage() {
 
           <button
             onClick={() => setCurrentWeekDate(new Date())}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all cursor-pointer"
           >
             Current Week
           </button>
@@ -266,7 +284,7 @@ export function WeeklyComplianceAuditPage() {
             <button
               key={cat}
               onClick={() => setSelectedCategory(cat)}
-              className={`px-3.5 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm ${
+              className={`px-3.5 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest whitespace-nowrap transition-all shadow-sm cursor-pointer ${
                 selectedCategory === cat
                   ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
                   : 'bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-700 border border-slate-200'
@@ -374,7 +392,7 @@ export function WeeklyComplianceAuditPage() {
                           key={d.dateStr}
                           disabled={d.isFutureDay}
                           onClick={() => setModalState({ type: 'FEED', animal, date: d.dateStr })}
-                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border cursor-pointer ${
                             d.isFutureDay
                               ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
                               : d.hasFeed
@@ -405,7 +423,7 @@ export function WeeklyComplianceAuditPage() {
                           key={d.dateStr}
                           disabled={d.isFutureDay}
                           onClick={() => setModalState({ type: 'WEIGHT', animal, date: d.dateStr })}
-                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                          className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border cursor-pointer ${
                             d.isFutureDay
                               ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
                               : d.hasWeight
@@ -439,7 +457,7 @@ export function WeeklyComplianceAuditPage() {
                             key={d.dateStr}
                             disabled={d.isFutureDay}
                             onClick={() => setModalState({ type: 'TEMP', animal, date: d.dateStr })}
-                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border cursor-pointer ${
                               d.isFutureDay
                                 ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
                                 : d.hasTemp
@@ -472,7 +490,7 @@ export function WeeklyComplianceAuditPage() {
                             key={d.dateStr}
                             disabled={d.isFutureDay}
                             onClick={() => setModalState({ type: 'MISTING', animal, date: d.dateStr })}
-                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border ${
+                            className={`w-full py-1 sm:py-1.5 lg:py-2 px-0.5 sm:px-1.5 min-h-[26px] sm:min-h-[30px] lg:min-h-[36px] rounded-md sm:rounded-xl text-[8px] sm:text-[10px] lg:text-xs font-black transition-all flex items-center justify-center border cursor-pointer ${
                               d.isFutureDay
                                 ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed opacity-50'
                                 : d.hasMisting
@@ -508,7 +526,7 @@ export function WeeklyComplianceAuditPage() {
           {modalState.type === 'FEED' && (
             <FeedModal
               isOpen={true}
-              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              onClose={closeModal}
               animalId={modalState.animal.id}
               selectedDate={modalState.date}
             />
@@ -517,7 +535,7 @@ export function WeeklyComplianceAuditPage() {
           {modalState.type === 'WEIGHT' && (
             <WeightModal
               isOpen={true}
-              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              onClose={closeModal}
               animalId={modalState.animal.id}
               selectedDate={modalState.date}
             />
@@ -526,7 +544,7 @@ export function WeeklyComplianceAuditPage() {
           {modalState.type === 'TEMP' && (
             <TemperatureModal
               isOpen={true}
-              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              onClose={closeModal}
               animalId={modalState.animal.id}
               selectedDate={modalState.date}
             />
@@ -535,7 +553,7 @@ export function WeeklyComplianceAuditPage() {
           {modalState.type === 'MISTING' && (
             <DailyLogFormModal
               isOpen={true}
-              onClose={() => setModalState({ type: null, animal: null, date: '' })}
+              onClose={closeModal}
               animal={modalState.animal}
               defaultType="MISTING"
             />

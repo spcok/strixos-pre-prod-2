@@ -2,7 +2,7 @@ import React, { useEffect, useMemo } from 'react';
 import { useForm } from '@tanstack/react-form';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
-import { X, Save, Loader2, Plus, Trash2, Utensils } from 'lucide-react';
+import { X, Save, Loader2, Plus, Trash2, Utensils, Users } from 'lucide-react';
 import { toast } from 'sonner'; 
 import { useAuth } from '../../lib/auth';
 import { supabase } from '../../lib/supabase';
@@ -43,7 +43,6 @@ const getDefaultDateTime = (selectedDate?: string) => {
   return selectedDate ? `${selectedDate}T${localTimeStr}` : now.toISOString().slice(0, 16);
 };
 
-// --- UNIFIED INPUT COMPONENTS ---
 function FormInput({ field, label, type = 'text', placeholder, hasError, rightAddon, step }: { field: any; label: string; type?: string; placeholder?: string; hasError?: boolean; rightAddon?: React.ReactNode; step?: string }) {
   const baseClasses = `w-full p-2.5 bg-slate-50 border rounded-xl outline-none text-sm md:text-xs font-bold text-slate-800 transition-all focus:bg-white focus:ring-4 ${
     hasError ? 'border-rose-300 focus:border-rose-500 focus:ring-rose-500/10' : 'border-slate-200 focus:border-slate-400 focus:ring-slate-900/5'
@@ -74,6 +73,15 @@ function FormInput({ field, label, type = 'text', placeholder, hasError, rightAd
 }
 
 function FormSelect({ field, label, options, placeholder, hasError }: { field: any; label: string; options: { value: string | number, label: string }[], placeholder?: string; hasError?: boolean }) {
+  // Ensure current value is included in options if it's custom/historical
+  const hasCurrentValue = field.state.value && options.some(o => o.value === field.state.value);
+  const renderedOptions = useMemo(() => {
+    if (field.state.value && !hasCurrentValue) {
+      return [{ value: field.state.value, label: `${field.state.value} (Custom)` }, ...options];
+    }
+    return options;
+  }, [options, field.state.value, hasCurrentValue]);
+
   return (
     <div className="flex flex-col gap-1 w-full">
       <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{label}</label>
@@ -86,7 +94,7 @@ function FormSelect({ field, label, options, placeholder, hasError }: { field: a
         }`}
       >
         {placeholder && <option value="" disabled>{placeholder}</option>}
-        {options.map((opt, i) => (
+        {renderedOptions.map((opt, i) => (
           <option key={i} value={opt.value}>{opt.label}</option>
         ))}
       </select>
@@ -123,24 +131,40 @@ const feedGroupSchema = z.object({
 
 type FeedFormValues = z.infer<typeof feedGroupSchema>;
 
-interface FeedModalProps { 
+export interface FeedModalProps { 
   isOpen: boolean; 
   onClose: () => void; 
   animalId: string; 
+  animal?: Animal | null;
   initialData?: any; 
   scheduledFeed?: any; 
   selectedDate?: string; 
 }
 
-export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFeed, selectedDate }: FeedModalProps) {
+export function FeedModal({ isOpen, onClose, animalId, animal: passedAnimal, initialData, scheduledFeed, selectedDate }: FeedModalProps) {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
 
-  const animal = useMemo(() => {
-    const cachedAnimals = queryClient.getQueryData<Animal[]>(['animals', 'dashboard']) || [];
-    return cachedAnimals.find(a => a.id === animalId);
-  }, [queryClient, animalId]);
+  // 1. ROBUST ANIMAL RESOLUTION (Prop -> Multi-Key Cache -> Single Query Fallback)
+  const { data: queriedAnimal } = useQuery({
+    queryKey: ['animal', animalId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('animals').select('*').eq('id', animalId).single();
+      if (error) throw error;
+      return data as Animal;
+    },
+    enabled: isOpen && !!animalId && !passedAnimal,
+    initialData: () => {
+      if (passedAnimal) return passedAnimal;
+      const cached = queryClient.getQueryData<Animal[]>(['animals', 'husbandry']) 
+        || queryClient.getQueryData<Animal[]>(['animals', 'dashboard'])
+        || queryClient.getQueryData<Animal[]>(['animals']);
+      return cached?.find(a => a.id === animalId);
+    }
+  });
 
+  const animal = passedAnimal || queriedAnimal;
+  const isGroupMob = animal?.record_type === 'GROUP';
   const animalCat = animal?.category?.toUpperCase().trim() || ''; 
 
   const { data: activeStaff = [] } = useQuery({
@@ -150,7 +174,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
       if (error) throw error;
       return data || [];
     },
-    staleTime: 0, gcTime: 1209600000, networkMode: 'offlineFirst', meta: { persist: true }
+    staleTime: 0, gcTime: 1209600000, networkMode: 'offlineFirst'
   });
 
   const { data: opLists = [] } = useQuery({
@@ -160,7 +184,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
       if (error) throw error;
       return data || [];
     },
-    staleTime: 0, gcTime: 1209600000, networkMode: 'offlineFirst', meta: { persist: true }
+    staleTime: 0, gcTime: 1209600000, networkMode: 'offlineFirst'
   });
 
   const foodOptions = useMemo(() => opLists.filter(l => {
@@ -177,20 +201,29 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
 
   const insertFeedMutation = useMutation({
     mutationFn: async (values: FeedFormValues) => {
-      const payloads = values.items.map(item => ({
-        id: item.id || crypto.randomUUID(), 
-        animal_id: animalId,
-        recorded_by: values.recorded_by,
-        recorded_at: new Date(values.recorded_at).toISOString(), 
-        created_by: profile?.id,
-        food_item: item.food_item || null,
-        feed_method: item.feed_method || null,
-        quantity: item.quantity || 0,
-        unit: item.unit,
-        calci_dust_added: item.calci_dust_added,
-        outcome: values.outcome, 
-        schedule_id: scheduledFeed?.id || null
-      }));
+      const payloads = values.items.map(item => {
+        let finalFoodItem = item.food_item?.trim() || null;
+        
+        // ZLA INSPECTION COMPLIANCE: Append (Whole Mob) if target is a Parent Mob
+        if (isGroupMob && finalFoodItem && !finalFoodItem.toLowerCase().includes('(whole mob)')) {
+          finalFoodItem = `${finalFoodItem} (Whole Mob)`;
+        }
+
+        return {
+          id: item.id || crypto.randomUUID(), 
+          animal_id: animalId,
+          recorded_by: values.recorded_by,
+          recorded_at: new Date(values.recorded_at).toISOString(), 
+          created_by: profile?.id,
+          food_item: finalFoodItem,
+          feed_method: item.feed_method || null,
+          quantity: item.quantity || 0,
+          unit: item.unit,
+          calci_dust_added: item.calci_dust_added,
+          outcome: values.outcome, 
+          schedule_id: scheduledFeed?.id || null
+        };
+      });
 
       if (scheduledFeed?.id) {
         await scheduledFeedingService.resolveScheduledFeed(scheduledFeed.id, values.outcome as any, payloads[0] as any);
@@ -203,15 +236,18 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
     onSuccess: () => {
       toast.success(scheduledFeed ? 'Schedule resolved & logged!' : initialData ? 'Feed updated successfully' : 'Feed logged successfully');
       queryClient.invalidateQueries({ queryKey: ['feeds'] });
+      queryClient.invalidateQueries({ queryKey: ['feed_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['strict_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard', 'next_feeds'] }); 
       onClose();
     },
-    onError: (error) => toast.error(`Failed to log feed: ${error.message}`),
+    onError: (error: any) => toast.error(`Failed to log feed: ${error.message}`),
   });
 
   const form = useForm<FeedFormValues>({
     defaultValues: {
-      recorded_by: initialData?.recorded_by || '', 
+      recorded_by: initialData?.recorded_by || profile?.id || '', 
       recorded_at: initialData?.recorded_at ? formatLocalDatetime(initialData.recorded_at) : getDefaultDateTime(selectedDate),
       outcome: 'EATEN',
       items: [{ food_item: '', feed_method: '', quantity: 1, unit: 'whole_item', calci_dust_added: false }]
@@ -225,6 +261,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
       form.reset(); 
       if (scheduledFeed) {
         const isFasting = scheduledFeed.notes === 'FAST DAY / NOT REQUIRED' || scheduledFeed.food_type === 'NOT REQUIRED';
+        form.setFieldValue('recorded_by', profile?.id || '');
         form.setFieldValue('recorded_at', scheduledFeed.scheduled_date ? `${scheduledFeed.scheduled_date}T12:00` : getDefaultDateTime(selectedDate));
         form.setFieldValue('outcome', isFasting ? 'FASTING' : 'EATEN');
         form.setFieldValue('items', [{
@@ -236,21 +273,28 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
           calci_dust_added: scheduledFeed.supplements === 'Calci-Dust' || false,
         }]);
       } else if (initialData) {
+        form.setFieldValue('recorded_by', initialData.recorded_by || profile?.id || '');
         form.setFieldValue('recorded_at', formatLocalDatetime(initialData.recorded_at || initialData.time || initialData.log_date));
         form.setFieldValue('outcome', initialData.outcome || 'EATEN');
+        
+        // Strip (Whole Mob) using regex for clean select matching
+        const rawFood = initialData.food_item || initialData.food_type || '';
+        const cleanFood = rawFood.replace(/\s*\((whole mob|whole group)\)/gi, '').trim();
+
         form.setFieldValue('items', [{
           id: initialData.id,
-          food_item: initialData.food_item || '',
+          food_item: cleanFood,
           feed_method: initialData.feed_method || '',
           quantity: initialData.quantity ?? initialData.quantity_consumed ?? initialData.food_consumed_g ?? initialData.quantity_offered ?? 1,
           unit: (initialData.unit === 'grams' || initialData.unit === 'g') ? 'grams' : 'whole_item',
-          calci_dust_added: initialData.calci_dust_added || false,
+          calci_dust_added: Boolean(initialData.calci_dust_added),
         }]);
       } else {
+        form.setFieldValue('recorded_by', profile?.id || '');
         form.setFieldValue('recorded_at', getDefaultDateTime(selectedDate));
       }
     }
-  }, [isOpen, scheduledFeed, initialData, selectedDate]);
+  }, [isOpen, scheduledFeed, initialData, selectedDate, profile?.id]);
 
   if (!isOpen) return null;
 
@@ -261,25 +305,41 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
         {/* HEADER */}
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-amber-50">
-              <Utensils size={18} className="text-amber-600" />
+            <div className={`p-2 rounded-xl ${isGroupMob ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'}`}>
+              {isGroupMob ? <Users size={18} /> : <Utensils size={18} />}
             </div>
             <div>
-              <h2 className="text-[15px] font-black text-slate-900 uppercase tracking-widest leading-tight">
-                {scheduledFeed ? 'Resolve Schedule' : initialData ? 'Edit Feed' : 'Log Feed'}
-              </h2>
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider leading-tight">
-                {animal?.name || 'Unknown Animal'}
+              <div className="flex items-center gap-2">
+                <h2 className="text-[15px] font-black text-slate-900 uppercase tracking-widest leading-tight">
+                  {scheduledFeed ? 'Resolve Schedule' : initialData ? 'Edit Feed' : 'Log Feed'}
+                </h2>
+                {isGroupMob && (
+                  <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">
+                    Whole Mob
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider leading-tight mt-0.5">
+                {animal?.name || 'Unknown Specimen'}
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer">
             <X size={20} />
           </button>
         </div>
 
         <form onSubmit={(e) => { e.preventDefault(); form.handleSubmit(); }} className="p-5 overflow-y-auto custom-scrollbar bg-white flex-1 relative space-y-6">
           
+          {isGroupMob && (
+            <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-800 font-medium flex items-start gap-2">
+              <Users size={16} className="text-blue-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>ZLA Compliance Notice:</strong> You are logging a feed for a parent mob. Entries will be automatically tagged with <strong>(Whole Mob)</strong> to indicate enclosure-level distribution.
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <form.Field name="recorded_at">{(field) => <FormInput field={field} label="Date & Time" type="datetime-local" />}</form.Field>
             <form.Field name="recorded_by">
@@ -314,7 +374,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
                           key={opt.value}
                           type="button"
                           onClick={() => field.handleChange(opt.value as any)}
-                          className={`flex-1 py-2 rounded-lg text-[10px] md:text-xs font-bold uppercase tracking-widest transition-all ${
+                          className={`flex-1 py-2 rounded-lg text-[10px] md:text-xs font-bold uppercase tracking-widest transition-all cursor-pointer ${
                             isSelected ? `${opt.color} shadow-md scale-100` : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50 scale-95'
                           }`}
                         >
@@ -339,7 +399,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
                   <button
                     type="button"
                     onClick={() => field.pushValue({ id: crypto.randomUUID(), food_item: '', feed_method: '', quantity: 1, unit: 'whole_item', calci_dust_added: false })}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-amber-50 text-amber-600 hover:bg-amber-100"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors bg-amber-50 text-amber-600 hover:bg-amber-100 cursor-pointer"
                   >
                     <Plus size={12} /> Add Item
                   </button>
@@ -353,7 +413,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
                   {itemsField.state.value.map((_, i) => (
                     <div key={i} className="relative space-y-3 group border-l-2 border-slate-200 pl-4 py-1 hover:border-amber-400 transition-colors">
                       {itemsField.state.value.length > 1 && (
-                        <button type="button" onClick={() => itemsField.removeValue(i)} className="absolute -top-1 right-0 text-slate-300 hover:text-rose-600 hover:bg-rose-50 p-1.5 rounded-lg transition-colors md:opacity-0 group-hover:opacity-100">
+                        <button type="button" onClick={() => itemsField.removeValue(i)} className="absolute -top-1 right-0 text-slate-300 hover:text-rose-600 hover:bg-rose-50 p-1.5 rounded-lg transition-colors md:opacity-0 group-hover:opacity-100 cursor-pointer">
                           <Trash2 size={14} />
                         </button>
                       )}
@@ -399,15 +459,16 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
 
         {/* FOOTER */}
         <div className="px-5 py-4 border-t border-slate-100 flex items-center justify-end bg-white gap-3 shrink-0">
-          <button type="button" onClick={onClose} className="px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">
+          <button type="button" onClick={onClose} className="px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer">
             Cancel
           </button>
           <form.Subscribe selector={(state) => [state.isSubmitting]}>
             {([isSubmitting]) => (
               <button
+                type="button"
                 onClick={form.handleSubmit}
                 disabled={insertFeedMutation.isPending}
-                className="flex items-center justify-center gap-2 px-8 py-2.5 text-white rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-md disabled:opacity-50 bg-amber-600 hover:bg-amber-500"
+                className="flex items-center justify-center gap-2 px-8 py-2.5 text-white rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-md disabled:opacity-50 bg-amber-600 hover:bg-amber-500 cursor-pointer"
               >
                 {(isSubmitting || insertFeedMutation.isPending) ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                 {scheduledFeed ? 'Log & Resolve' : initialData ? 'Update Feed' : 'Save Feed'}
@@ -419,4 +480,6 @@ export function FeedModal({ isOpen, onClose, animalId, initialData, scheduledFee
       </div>
     </div>
   );
-} 
+}
+
+export default FeedModal;

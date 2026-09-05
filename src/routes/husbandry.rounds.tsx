@@ -4,9 +4,10 @@ import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual'; 
 import { 
   CheckCircle2, AlertCircle, Droplets, Lock, HeartPulse, 
-  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, Users, User
+  ChevronLeft, ChevronRight, Loader2, Edit3, X, Save, Search, 
+  Users, User, ChevronDown, CornerDownRight
 } from 'lucide-react';
-import { format, addDays, parseISO } from 'date-fns';
+import { format } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { dailyRoundsService } from '../services/dailyRoundsService';
@@ -74,6 +75,14 @@ function useIsMobile() {
   return isMobile;
 }
 
+interface DisplayAnimalRow extends Animal {
+  isGroupParent?: boolean;
+  isChildMember?: boolean;
+  childCount?: number;
+  parentGroupId?: string;
+  parentGroupName?: string;
+}
+
 // ------------------------------------------------------------------
 // 4. MAIN COMPONENT
 // ------------------------------------------------------------------
@@ -92,6 +101,7 @@ function DailyRounds() {
   // -- Unified Control Deck State --
   const [activeTab, setActiveTab] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [expandedMobs, setExpandedMobs] = useState<Set<string>>(new Set());
 
   const [draftRounds, setDraftRounds] = useState<Record<string, Partial<DailyRound>>>({});
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -120,7 +130,6 @@ function DailyRounds() {
 
   // ==========================================
   // O(1) HASH MAP OPTIMIZATION 
-  // Prevents CPU stutter when tapping checkboxes
   // ==========================================
   const roundsMap = useMemo(() => {
     const map = new Map<string, DailyRound>();
@@ -131,21 +140,129 @@ function DailyRounds() {
   const categories = useMemo(() => Array.from(new Set(animals.map(a => a.category).filter(Boolean))).sort(), [animals]);
   const tabs = ['ALL', ...categories];
 
-  const displayAnimals = useMemo(() => {
-    let filtered = animals.filter(a => a.status !== 'ARCHIVED');
-    if (activeTab !== 'ALL') {
-      filtered = filtered.filter(a => a.category === activeTab);
+  const toggleMob = (mobId: string) => {
+    setExpandedMobs(prev => {
+      const next = new Set(prev);
+      if (next.has(mobId)) {
+        next.delete(mobId);
+      } else {
+        next.add(mobId);
+      }
+      return next;
+    });
+  };
+
+  // AUTO-EXPAND MOBS ON SEARCH
+  useEffect(() => {
+    if (!searchQuery.trim()) return;
+    const q = searchQuery.toLowerCase();
+    
+    const mobsToExpand = new Set<string>();
+    animals.forEach(a => {
+      if (a.parent_group_id) {
+        const matches = 
+          a.name.toLowerCase().includes(q) ||
+          (a.species && a.species.toLowerCase().includes(q)) ||
+          (a.ring_number && a.ring_number.toLowerCase().includes(q));
+        
+        if (matches) {
+          mobsToExpand.add(a.parent_group_id);
+        }
+      }
+    });
+
+    if (mobsToExpand.size > 0) {
+      setExpandedMobs(prev => {
+        const next = new Set(prev);
+        mobsToExpand.forEach(id => next.add(id));
+        return next;
+      });
     }
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(a => 
-        a.name.toLowerCase().includes(q) || 
-        a.species?.toLowerCase().includes(q) ||
-        a.ring_number?.toLowerCase().includes(q)
+  }, [searchQuery, animals]);
+
+  // ==========================================
+  // HIERARCHICAL FLATTENED DATA ENGINE
+  // ==========================================
+  const displayAnimals = useMemo<DisplayAnimalRow[]>(() => {
+    const activeAnimals = animals.filter(a => a.status !== 'ARCHIVED');
+
+    const childrenByParent = new Map<string, Animal[]>();
+    const parentGroups: Animal[] = [];
+    const standaloneIndividuals: Animal[] = [];
+
+    activeAnimals.forEach(a => {
+      if (a.record_type === 'GROUP') {
+        parentGroups.push(a);
+      } else if (a.parent_group_id) {
+        const existing = childrenByParent.get(a.parent_group_id) || [];
+        existing.push(a);
+        childrenByParent.set(a.parent_group_id, existing);
+      } else {
+        standaloneIndividuals.push(a);
+      }
+    });
+
+    const topLevelEntities = [...parentGroups, ...standaloneIndividuals];
+    topLevelEntities.sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0) || a.name.localeCompare(b.name));
+
+    const q = searchQuery.toLowerCase().trim();
+
+    const matchesFilter = (a: Animal) => {
+      if (activeTab !== 'ALL' && a.category !== activeTab) return false;
+      if (!q) return true;
+      return (
+        a.name.toLowerCase().includes(q) ||
+        (a.species && a.species.toLowerCase().includes(q)) ||
+        (a.ring_number && a.ring_number.toLowerCase().includes(q))
       );
-    }
-    return filtered;
-  }, [animals, activeTab, searchQuery]);
+    };
+
+    const flattenedRows: DisplayAnimalRow[] = [];
+
+    topLevelEntities.forEach(entity => {
+      const isGroup = entity.record_type === 'GROUP';
+      const children = isGroup ? (childrenByParent.get(entity.id) || []) : [];
+      children.sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0) || a.name.localeCompare(b.name));
+
+      const groupMatches = matchesFilter(entity);
+      const matchingChildren = children.filter(matchesFilter);
+      const hasMatchingChild = matchingChildren.length > 0;
+
+      if (!isGroup) {
+        if (groupMatches) {
+          flattenedRows.push({
+            ...entity,
+            isGroupParent: false,
+            isChildMember: false,
+          });
+        }
+      } else {
+        if (groupMatches || hasMatchingChild) {
+          flattenedRows.push({
+            ...entity,
+            isGroupParent: true,
+            isChildMember: false,
+            childCount: children.length,
+          });
+
+          if (expandedMobs.has(entity.id)) {
+            const visibleChildren = q ? matchingChildren : children;
+            visibleChildren.forEach(child => {
+              flattenedRows.push({
+                ...child,
+                isGroupParent: false,
+                isChildMember: true,
+                parentGroupId: entity.id,
+                parentGroupName: entity.name,
+              });
+            });
+          }
+        }
+      }
+    });
+
+    return flattenedRows;
+  }, [animals, activeTab, searchQuery, expandedMobs]);
 
   // ==========================================
   // BULLETPROOF DYNAMIC VIRTUALIZER
@@ -181,7 +298,6 @@ function DailyRounds() {
   };
 
   const shiftDate = (days: number) => {
-    // DST FIX: Use 12:00 PM to prevent midnight timezone boundary jumps
     const parts = activeDate.split('-');
     if (parts.length !== 3) return;
     const [y, m, d] = parts.map(Number);
@@ -195,10 +311,16 @@ function DailyRounds() {
     handleDateChange(newDateString);
   };
 
-  const handleToggle = (animalId: string, field: keyof DailyRound) => {
+  // ==========================================
+  // CASCADE TOGGLE (Parent Mob -> All Members)
+  // ==========================================
+  const handleToggle = (targetAnimal: Animal, field: keyof DailyRound) => {
+    const animalId = targetAnimal.id;
+    const isGroup = targetAnimal.record_type === 'GROUP';
+
     setDraftRounds(prev => {
       const existingDraft = prev[animalId];
-      const dbRound = roundsMap.get(animalId); // Fast O(1) lookup
+      const dbRound = roundsMap.get(animalId); 
       
       const currentState = existingDraft?.[field] !== undefined 
         ? existingDraft[field] 
@@ -206,7 +328,7 @@ function DailyRounds() {
 
       const newState = !currentState;
 
-      return {
+      const updated: Record<string, Partial<DailyRound>> = {
         ...prev,
         [animalId]: {
           ...prev[animalId],
@@ -214,7 +336,29 @@ function DailyRounds() {
           [field]: newState
         }
       };
+
+      // If toggling a parent Mob, cascade the check to ALL child specimens
+      if (isGroup) {
+        const childAnimals = animals.filter(a => a.parent_group_id === animalId);
+        childAnimals.forEach(child => {
+          const childDraft = prev[child.id];
+          const childDb = roundsMap.get(child.id);
+
+          updated[child.id] = {
+            ...prev[child.id],
+            animal_id: child.id,
+            is_alive: childDraft?.is_alive !== undefined ? childDraft.is_alive : (childDb?.is_alive ?? true),
+            water_checked: childDraft?.water_checked !== undefined ? childDraft.water_checked : (childDb?.water_checked ?? false),
+            locks_secured: childDraft?.locks_secured !== undefined ? childDraft.locks_secured : (childDb?.locks_secured ?? false),
+            animal_issue_note: childDraft?.animal_issue_note !== undefined ? childDraft.animal_issue_note : childDb?.animal_issue_note,
+            [field]: newState
+          };
+        });
+      }
+
+      return updated;
     });
+
     setHasUnsavedChanges(true);
     setSubmissionStatus(null);
   };
@@ -227,7 +371,7 @@ function DailyRounds() {
       setSubmissionStatus(null);
 
       const roundsToSubmit: Partial<DailyRound>[] = Object.values(draftRounds).map(draft => {
-        const dbRound = roundsMap.get(draft.animal_id!); // Fast O(1) lookup
+        const dbRound = roundsMap.get(draft.animal_id!); 
         const isEdit = !!dbRound?.id;
         
         return {
@@ -262,12 +406,12 @@ function DailyRounds() {
   };
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 w-full">
+    <div className="h-[calc(100vh-6rem)] flex flex-col space-y-3 lg:space-y-4 animate-in fade-in duration-500 w-full font-sans">
       
       {/* Block A: Header Ribbon */}
       <div className="flex justify-between items-center w-full mb-1 portrait:flex landscape:hidden lg:landscape:flex shrink-0">
         <div className="shrink-0 pr-4">
-           <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight">Daily Rounds</h1>
+           <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight uppercase">Daily Rounds</h1>
         </div>
       </div>
 
@@ -278,7 +422,7 @@ function DailyRounds() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
           <input 
             type="text" 
-            placeholder="Search animals..." 
+            placeholder="Search animals or mobs..." 
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs lg:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all shadow-sm placeholder:text-slate-400"
@@ -287,7 +431,9 @@ function DailyRounds() {
 
         <div className="flex flex-col sm:flex-row items-center gap-2 sm:ml-auto w-full sm:w-auto">
           <div className="flex items-center justify-between bg-white rounded-xl p-1 border border-slate-200 shadow-sm w-full sm:w-auto shrink-0">
-            <button onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronLeft size={16} /></button>
+            <button type="button" onClick={() => shiftDate(-1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95 cursor-pointer">
+              <ChevronLeft size={16} />
+            </button>
             <div className="flex-1 sm:flex-none relative flex justify-center border-l border-r border-slate-100 px-2 min-w-[120px]">
               <input 
                 type="date" 
@@ -297,13 +443,16 @@ function DailyRounds() {
                 className="text-[10px] lg:text-xs font-black text-slate-700 uppercase tracking-widest bg-transparent border-none focus:ring-0 text-center py-1 cursor-pointer w-full"
               />
             </div>
-            <button onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95"><ChevronRight size={16} /></button>
+            <button type="button" onClick={() => shiftDate(1)} className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-500 hover:text-slate-800 transition-all active:scale-95 cursor-pointer">
+              <ChevronRight size={16} />
+            </button>
           </div>
 
           <div className="flex bg-slate-200/50 p-1 rounded-xl w-full sm:w-auto shrink-0">
             <button
+              type="button"
               onClick={() => setActiveShift('MORNING')}
-              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all ${
+              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all cursor-pointer ${
                 activeShift === 'MORNING' 
                   ? 'bg-white text-emerald-600 shadow-sm' 
                   : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
@@ -312,8 +461,9 @@ function DailyRounds() {
               AM Shift
             </button>
             <button
+              type="button"
               onClick={() => setActiveShift('AFTERNOON')}
-              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all ${
+              className={`flex-1 sm:flex-none px-4 py-1.5 rounded-lg text-[10px] lg:text-xs font-black uppercase tracking-widest transition-all cursor-pointer ${
                 activeShift === 'AFTERNOON' 
                   ? 'bg-white text-emerald-600 shadow-sm' 
                   : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
@@ -325,13 +475,14 @@ function DailyRounds() {
         </div>
       </div>
 
-      {/* Block C: Category Tabs (Perfectly matched to daily-logs) */}
-      <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full shrink-0 gap-1.5">
+      {/* Block C: Category Tabs */}
+      <div className="grid grid-cols-4 lg:flex lg:gap-2 w-full shrink-0 gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
         {tabs.map(tab => (
           <button
             key={tab}
+            type="button"
             onClick={() => setActiveTab(tab)}
-            className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm ${
+            className={`px-1 lg:px-4 py-1.5 lg:py-2 rounded-xl text-[9px] lg:text-xs font-black uppercase tracking-widest whitespace-nowrap lg:whitespace-normal transition-all shadow-sm cursor-pointer ${
               activeTab === tab 
                 ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-900/20'
                 : 'bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700 border border-slate-200'
@@ -354,15 +505,15 @@ function DailyRounds() {
             </div>
           )}
 
-          <div ref={parentRef} className="h-full overflow-y-auto overflow-x-hidden custom-scrollbar">
+          <div ref={parentRef} className="h-full overflow-y-auto overflow-x-hidden custom-scrollbar pb-24">
             
             {displayAnimals.length === 0 && !isLoading ? (
               <div className="flex flex-col items-center justify-center py-20 text-center text-slate-500">
-                <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center mb-4 border border-slate-200">
+                <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center mb-4 border border-slate-200 shadow-sm">
                   <Search size={24} className="text-slate-400" />
                 </div>
-                <p className="font-bold text-slate-700 mb-1">No collections found</p>
-                <p className="text-xs">Adjust your search or filters.</p>
+                <p className="font-bold text-slate-700 mb-1 text-sm">No specimens matched</p>
+                <p className="text-xs">Adjust your search or category filters.</p>
               </div>
             ) : (
               <div
@@ -374,12 +525,14 @@ function DailyRounds() {
               >
                 {virtualizer.getVirtualItems().map((virtualItem) => {
                   const animal = displayAnimals[virtualItem.index];
-                  // O(1) Lookup - No more sluggish input lag
                   const dbRound = roundsMap.get(animal.id);
                   const draft = draftRounds[animal.id];
                   const mergedRound = draft ? { ...dbRound, ...draft } : dbRound;
 
-                  const isGroup = animal.record_type === 'GROUP';
+                  const isGroup = animal.isGroupParent;
+                  const isChild = animal.isChildMember;
+                  const isExpanded = isGroup && expandedMobs.has(animal.id);
+
                   const isAlive = mergedRound?.is_alive !== undefined ? mergedRound.is_alive : true;
                   const waterChecked = mergedRound?.water_checked !== undefined ? mergedRound.water_checked : false;
                   const locksSecured = mergedRound?.locks_secured !== undefined ? mergedRound.locks_secured : false;
@@ -390,16 +543,47 @@ function DailyRounds() {
                       key={animal.id}
                       data-index={virtualItem.index}
                       ref={virtualizer.measureElement}
-                      className="absolute top-0 left-0 w-full border-b border-slate-100 hover:bg-slate-50/50 transition-colors box-border"
+                      className={`absolute top-0 left-0 w-full border-b transition-colors box-border ${
+                        isChild 
+                          ? 'bg-slate-50/70 hover:bg-slate-100/70 border-slate-200' 
+                          : isGroup
+                          ? 'bg-blue-50/20 hover:bg-blue-50/40 border-blue-200'
+                          : 'hover:bg-slate-50/50 border-slate-100'
+                      }`}
                       style={{
                         transform: `translateY(${virtualItem.start}px)`,
                       }}
                     >
                       <div className="w-full px-4 py-2 lg:py-2.5 flex flex-col lg:flex-row gap-3 lg:gap-4 lg:items-center">
                         
-                        {/* UNIFIED IDENTITY BLOCK (Matched to Daily Logs & Dashboard) */}
-                        <div className="flex items-center gap-3 min-w-0 w-full lg:w-[35%] py-1 shrink-0">
-                          <div className={`w-8 h-8 lg:w-10 lg:h-10 rounded-full flex items-center justify-center shrink-0 border shadow-sm overflow-hidden ${!animal.profile_image_url ? (isGroup ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-50 text-slate-400 border-slate-200') : 'border-slate-200'}`}>
+                        {/* IDENTITY BLOCK */}
+                        <div className={`flex items-center gap-3 min-w-0 w-full lg:w-[35%] py-1 shrink-0 ${isChild ? 'pl-6 lg:pl-8 relative' : ''}`}>
+                          
+                          {isGroup && (
+                            <button
+                              type="button"
+                              onClick={() => toggleMob(animal.id)}
+                              className="p-1 rounded-lg text-slate-400 hover:text-slate-800 hover:bg-slate-200/60 transition-colors shrink-0 cursor-pointer"
+                            >
+                              {isExpanded ? <ChevronDown size={18} className="text-blue-600" /> : <ChevronRight size={18} />}
+                            </button>
+                          )}
+
+                          {isChild && (
+                            <div className="absolute left-2 lg:left-3 top-1/2 -translate-y-1/2 text-slate-300">
+                              <CornerDownRight size={14} />
+                            </div>
+                          )}
+
+                          <div className={`w-8 h-8 lg:w-10 lg:h-10 rounded-full flex items-center justify-center shrink-0 border shadow-sm overflow-hidden ${
+                            isGroup 
+                              ? 'bg-blue-100 text-blue-700 border-blue-200' 
+                              : isChild
+                              ? 'bg-slate-50 text-slate-400 border-slate-200'
+                              : !animal.profile_image_url 
+                              ? 'bg-slate-50 text-slate-400 border-slate-200' 
+                              : 'border-slate-200'
+                          }`}>
                             {animal.profile_image_url ? (
                               <img src={animal.profile_image_url} alt={animal.name} className="w-full h-full object-cover" />
                             ) : (
@@ -408,23 +592,36 @@ function DailyRounds() {
                           </div>
                           
                           <div className="flex flex-col min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <h3 className="font-bold text-slate-900 text-[11px] md:text-[12px] lg:text-[13px] tracking-tight truncate" title={animal.name}>{animal.name}</h3>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <h3 
+                                onClick={() => isGroup && toggleMob(animal.id)}
+                                className={`font-bold text-slate-900 text-[11px] md:text-[12px] lg:text-[13px] tracking-tight truncate ${isGroup ? 'cursor-pointer hover:text-blue-600 font-black' : ''}`} 
+                                title={animal.name}
+                              >
+                                {animal.name}
+                              </h3>
+                              {isGroup && (
+                                <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider shrink-0">
+                                  Mob ({animal.childCount})
+                                </span>
+                              )}
                               {hasNote && <AlertCircle size={12} className="text-amber-500 shrink-0 lg:w-3.5 lg:h-3.5" />}
                             </div>
                             <div className="flex items-center gap-1.5 text-[9px] md:text-[10px] lg:text-[11px] text-slate-500 truncate mt-0.5">
-                              {animal.ring_number && <span className="font-black text-slate-400 uppercase tracking-widest">{animal.ring_number}</span>}
-                              {animal.ring_number && animal.species && <span>•</span>}
-                              {animal.species && <span className="italic truncate" title={animal.species}>{animal.species}</span>}
+                              {animal.ring_number && <span className="font-mono font-bold text-slate-400 uppercase tracking-widest">{animal.ring_number}</span>}
+                              {animal.ring_number && (animal.species || animal.gender) && <span>•</span>}
+                              {isChild && animal.gender && <span className="uppercase text-slate-400">{animal.gender}</span>}
+                              {!isChild && animal.species && <span className="italic truncate" title={animal.species}>{animal.species}</span>}
                             </div>
                           </div>
                         </div>
 
-                        {/* PROPORTIONAL ACTIONS BLOCK */}
+                        {/* ACTIONS BLOCK */}
                         <div className="grid grid-cols-2 lg:flex lg:flex-row flex-1 gap-2 lg:gap-3 lg:justify-end">
                           <button
-                            onClick={() => handleToggle(animal.id, 'is_alive')}
-                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                            type="button"
+                            onClick={() => handleToggle(animal, 'is_alive')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-sm transition-all lg:w-[130px] cursor-pointer ${
                               isAlive 
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
                                 : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
@@ -435,8 +632,9 @@ function DailyRounds() {
                           </button>
 
                           <button
-                            onClick={() => handleToggle(animal.id, 'water_checked')}
-                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                            type="button"
+                            onClick={() => handleToggle(animal, 'water_checked')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-sm transition-all lg:w-[130px] cursor-pointer ${
                               waterChecked 
                                 ? 'bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100' 
                                 : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
@@ -447,8 +645,9 @@ function DailyRounds() {
                           </button>
 
                           <button
-                            onClick={() => handleToggle(animal.id, 'locks_secured')}
-                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[130px] ${
+                            type="button"
+                            onClick={() => handleToggle(animal, 'locks_secured')}
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-sm transition-all lg:w-[130px] cursor-pointer ${
                               locksSecured 
                                 ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
                                 : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
@@ -459,8 +658,9 @@ function DailyRounds() {
                           </button>
 
                           <button
+                            type="button"
                             onClick={() => setNoteModalState({ isOpen: true, animal, round: mergedRound as DailyRound, currentNote: mergedRound?.animal_issue_note || '' })}
-                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-[0_1px_2px_rgba(0,0,0,0.02)] transition-all lg:w-[120px] ${
+                            className={`flex items-center justify-center lg:justify-start gap-1.5 lg:gap-2 py-1.5 px-2.5 lg:py-2 lg:px-3 rounded-lg lg:rounded-xl border shadow-sm transition-all lg:w-[120px] cursor-pointer ${
                               hasNote 
                                 ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' 
                                 : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
@@ -499,9 +699,10 @@ function DailyRounds() {
           </div>
           
           <button
+            type="button"
             onClick={handleSubmit}
             disabled={!hasUnsavedChanges || isSubmitting}
-            className={`px-6 py-2.5 lg:py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm ${
+            className={`px-6 py-2.5 lg:py-3 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shrink-0 shadow-sm cursor-pointer ${
               hasUnsavedChanges && !isSubmitting
                 ? 'bg-emerald-500 hover:bg-emerald-600 text-white hover:shadow-md active:scale-95'
                 : 'bg-slate-100 text-slate-400 cursor-not-allowed'
@@ -523,8 +724,9 @@ function DailyRounds() {
                 <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mt-0.5">Round Issue Note</p>
               </div>
               <button 
+                type="button"
                 onClick={() => setNoteModalState({ isOpen: false, animal: null, round: null, currentNote: '' })}
-                className="text-slate-400 hover:text-slate-600 p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                className="text-slate-400 hover:text-slate-600 p-2 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
               >
                 <X size={20} />
               </button>
@@ -541,19 +743,21 @@ function DailyRounds() {
             
             <div className="p-4 border-t border-slate-100 bg-slate-50 flex gap-2">
               <button
+                type="button"
                 onClick={() => setNoteModalState({ isOpen: false, animal: null, round: null, currentNote: '' })}
-                className="flex-1 py-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold uppercase tracking-widest rounded-xl transition-colors shadow-sm active:scale-95"
+                className="flex-1 py-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold uppercase tracking-widest rounded-xl transition-colors shadow-sm active:scale-95 cursor-pointer"
               >
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={() => {
                   const animalId = noteModalState.animal!.id;
                   const trimmed = noteModalState.currentNote.trim();
                   
                   setDraftRounds(prev => {
                     const existingDraft = prev[animalId];
-                    const dbRound = roundsMap.get(animalId); // Fast O(1) Lookup
+                    const dbRound = roundsMap.get(animalId);
                     const merged = existingDraft ? { ...dbRound, ...existingDraft } : dbRound;
 
                     return {
@@ -572,7 +776,7 @@ function DailyRounds() {
                   setSubmissionStatus(null);
                   setNoteModalState({ isOpen: false, animal: null, round: null, currentNote: '' });
                 }}
-                className="flex-1 py-3 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold uppercase tracking-widest rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2 active:scale-95"
+                className="flex-1 py-3 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold uppercase tracking-widest rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
               >
                 <Save size={16} />
                 Save Draft Note

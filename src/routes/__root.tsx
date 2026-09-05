@@ -45,7 +45,12 @@ function GlobalSyncEngine() {
           'safety_drills': ['safety_drills'],
           'shifts': ['shifts_data'],
           'timesheets': ['timesheets', 'my_active_shift', 'active_timesheets_rollcall'],
-          'isolation_logs': ['isolation_logs_complete']
+          'isolation_logs': ['isolation_logs_complete'],
+          'vouchers': ['vouchers', 'vouchers_list'],
+          'feed_logs': ['feeds'],
+          'weight_logs': ['weights'],
+          'temperature_logs': ['temperatures'],
+          'mist_logs': ['mist_logs']
         };
 
         const keysToInvalidate = tableToKeyMap[table];
@@ -72,19 +77,19 @@ function GlobalSyncEngine() {
 function RouteGatekeeper({ children }: { children: React.ReactNode }) {
   const { hasPermission, profile, isLocked, isLoading } = useAuth();
   const location = useLocation();
-
   const path = location.pathname;
   
-  // Exact mapping of physical routes to V2 granular permissions
-  const routePermissions: Record<string, string> = {
+  // Exact mapping of physical routes to V2 granular permissions (Supports single string or array)
+  const routePermissions: Record<string, string | string[]> = {
+    '/husbandry/import': 'husbandry:write',
     '/clinical': 'clinical:read',
-    '/logistics/vouchers': 'vouchers:scan',
-    '/logistics/internal-movements': 'transfers:read',
-    '/logistics/external-transfers': 'transfers:read',
+    '/logistics/vouchers': ['vouchers:read', 'vouchers:scan', 'vouchers:manage'],
+    '/logistics/internal-movements': ['transfers:read', 'logistics:read'],
+    '/logistics/external-transfers': ['transfers:read', 'logistics:read'],
     '/safety': 'safety:read', 
-    '/staff/rota': 'rota:view',
-    '/staff/shifts': 'shifts:manage',
-    '/staff/leave': 'timesheet:self',
+    '/staff/rota': ['rota:view', 'hr:read'],
+    '/staff/shifts': ['shifts:manage', 'timesheet:self'],
+    '/staff/leave': ['hr:read', 'timesheet:self'],
     '/staff/timesheets': 'timesheet:self',
     '/staff/missing-records': 'timesheet:self',
     '/settings/rbac': 'admin:settings',
@@ -92,18 +97,24 @@ function RouteGatekeeper({ children }: { children: React.ReactNode }) {
   };
 
   // Sort by length descending ensures specific sub-paths match before broad parent paths
-  const requiredPerm = Object.entries(routePermissions)
+  const matchedPerms = Object.entries(routePermissions)
     .sort(([a], [b]) => b.length - a.length)
     .find(([routePrefix]) => path.startsWith(routePrefix))?.[1];
 
-  const isDenied = !isLoading && profile && !isLocked && requiredPerm && !hasPermission(requiredPerm);
+  const hasAccess = matchedPerms
+    ? Array.isArray(matchedPerms)
+      ? matchedPerms.some((perm) => hasPermission(perm))
+      : hasPermission(matchedPerms)
+    : true;
+
+  const isDenied = !isLoading && profile && !isLocked && !hasAccess;
 
   useEffect(() => {
     if (isDenied) {
-      console.warn(`[Route Gatekeeper] Access denied for path: ${path}. Missing perm: ${requiredPerm}`);
+      console.warn(`[Route Gatekeeper] Access denied for path: ${path}. Required:`, matchedPerms);
       toast.error('Unauthorized Access: You do not have permission to view this module.');
     }
-  }, [isDenied, path, requiredPerm]);
+  }, [isDenied, path, matchedPerms]);
 
   if (isDenied) {
     return <Navigate to="/" replace={true} />;
@@ -117,7 +128,6 @@ function RouteGatekeeper({ children }: { children: React.ReactNode }) {
 // ------------------------------------------------------------------
 function AuthGuard() {
   const { session, isLoading } = useAuth();
-  // Changed default to true so desktop starts expanded
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); 
   
   if (isLoading) {
@@ -132,7 +142,6 @@ function AuthGuard() {
 
   if (!session) return <LoginScreen />;
 
-  // Toggle handler for the Header hamburger menu
   const toggleSidebar = () => {
     setIsSidebarOpen(prev => !prev);
   };
@@ -141,25 +150,24 @@ function AuthGuard() {
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans antialiased overflow-hidden">
       <GlobalSyncEngine />
       
-      {/* DESKTOP UI: Permanent Sidebar (Accepts the state boolean) */}
+      {/* DESKTOP UI: Permanent Sidebar */}
       <div className="hidden md:flex h-full z-20">
         <Sidebar isOpen={isSidebarOpen} /> 
       </div>
       
       {/* MOBILE UI: Slide-Out Drawer Overlay */}
       <div className={`md:hidden fixed inset-0 z-50 transition-all duration-300 ${isSidebarOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}>
-         <div 
-           className={`absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0'}`}
-           onClick={() => setIsSidebarOpen(false)} // Close on tap outside
-         />
-         <div className={`absolute top-0 left-0 h-full w-[280px] bg-slate-900 shadow-2xl transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-            <Sidebar isOpen={true} onMobileClose={() => setIsSidebarOpen(false)} />
-         </div>
+        <div 
+          className={`absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0'}`}
+          onClick={() => setIsSidebarOpen(false)}
+        />
+        <div className={`absolute top-0 left-0 h-full w-[280px] bg-slate-900 shadow-2xl transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+          <Sidebar isOpen={true} onMobileClose={() => setIsSidebarOpen(false)} />
+        </div>
       </div>
 
       {/* MAIN CONTENT AREA */}
       <div className="flex flex-col flex-1 overflow-hidden transition-all duration-300">
-        {/* Pass the toggle function to the Header */}
         <Header onMenuClick={toggleSidebar} />
         
         <main className="flex-1 overflow-x-hidden overflow-y-auto p-4 md:p-6 custom-scrollbar">
@@ -171,3 +179,5 @@ function AuthGuard() {
     </div>
   );
 }
+
+export default AuthGuard;

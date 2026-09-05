@@ -2,11 +2,12 @@ import React, { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ClipboardList, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { Animal } from '../../types';
 
 interface HusbandryLogsProps {
   animalId: string;
   weightUnit?: string;
-  animal?: any;
+  animal?: Animal | null;
 }
 
 const getLocalDateString = (dateObj: Date) => {
@@ -21,13 +22,20 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
     return getLocalDateString(d);
   });
   
-  const [logFilter, setLogFilter] = useState<'ALL' | 'FEEDING' | 'WEIGHT' | 'TEMP'>('ALL');
+  const [logFilter, setLogFilter] = useState<'ALL' | 'FEEDING' | 'WEIGHT' | 'TEMP' | 'MIST'>('ALL');
 
   const { data: feeds = [], isLoading: loadingFeeds, error: feedsError } = useQuery({
     queryKey: ['feed_logs', animalId, startDate, endDate],
     queryFn: async () => {
-      const { data, error } = await supabase.from('feed_logs').select('*').eq('animal_id', animalId).eq('is_deleted', false).gte('recorded_at', `${startDate}T00:00:00Z`).lte('recorded_at', `${endDate}T23:59:59.999Z`);
-      if (error) throw error; return data || [];
+      const { data, error } = await supabase
+        .from('feed_logs')
+        .select('*')
+        .eq('animal_id', animalId)
+        .eq('is_deleted', false)
+        .gte('recorded_at', `${startDate}T00:00:00Z`)
+        .lte('recorded_at', `${endDate}T23:59:59.999Z`);
+      if (error) throw error; 
+      return data || [];
     },
     enabled: !!animalId,
   });
@@ -35,8 +43,15 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
   const { data: weights = [], isLoading: loadingWeights, error: weightsError } = useQuery({
     queryKey: ['weight_logs', animalId, startDate, endDate],
     queryFn: async () => {
-      const { data, error } = await supabase.from('weight_logs').select('*').eq('animal_id', animalId).eq('is_deleted', false).gte('recorded_at', `${startDate}T00:00:00Z`).lte('recorded_at', `${endDate}T23:59:59.999Z`);
-      if (error) throw error; return data || [];
+      const { data, error } = await supabase
+        .from('weight_logs')
+        .select('*')
+        .eq('animal_id', animalId)
+        .eq('is_deleted', false)
+        .gte('recorded_at', `${startDate}T00:00:00Z`)
+        .lte('recorded_at', `${endDate}T23:59:59.999Z`);
+      if (error) throw error; 
+      return data || [];
     },
     enabled: !!animalId,
   });
@@ -44,8 +59,31 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
   const { data: temps = [], isLoading: loadingTemps, error: tempsError } = useQuery({
     queryKey: ['temperature_logs', animalId, startDate, endDate],
     queryFn: async () => {
-      const { data, error } = await supabase.from('temperature_logs').select('*').eq('animal_id', animalId).eq('is_deleted', false).gte('recorded_at', `${startDate}T00:00:00Z`).lte('recorded_at', `${endDate}T23:59:59.999Z`);
-      if (error) throw error; return data || [];
+      const { data, error } = await supabase
+        .from('temperature_logs')
+        .select('*')
+        .eq('animal_id', animalId)
+        .eq('is_deleted', false)
+        .gte('recorded_at', `${startDate}T00:00:00Z`)
+        .lte('recorded_at', `${endDate}T23:59:59.999Z`);
+      if (error) throw error; 
+      return data || [];
+    },
+    enabled: !!animalId,
+  });
+
+  const { data: mists = [], isLoading: loadingMists, error: mistsError } = useQuery({
+    queryKey: ['mist_logs', animalId, startDate, endDate],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('mist_logs')
+        .select('*')
+        .eq('animal_id', animalId)
+        .eq('is_deleted', false)
+        .gte('recorded_at', `${startDate}T00:00:00Z`)
+        .lte('recorded_at', `${endDate}T23:59:59.999Z`);
+      if (error) throw error;
+      return data || [];
     },
     enabled: !!animalId,
   });
@@ -62,17 +100,21 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
     if (logFilter === 'ALL' || logFilter === 'TEMP') {
       temps.forEach(t => combined.push({ id: `temp_${t.id}`, type: 'TEMP', timestamp: new Date(t.recorded_at).getTime(), dateObj: new Date(t.recorded_at), data: t }));
     }
+    if (logFilter === 'ALL' || logFilter === 'MIST') {
+      mists.forEach(m => combined.push({ id: `mist_${m.id}`, type: 'MIST', timestamp: new Date(m.recorded_at).getTime(), dateObj: new Date(m.recorded_at), data: m }));
+    }
 
     return combined.sort((a, b) => b.timestamp - a.timestamp);
-  }, [feeds, weights, temps, logFilter]);
+  }, [feeds, weights, temps, mists, logFilter]);
 
-  const isLoading = loadingFeeds || loadingWeights || loadingTemps;
-  const hasError = feedsError || weightsError || tempsError;
+  const isLoading = loadingFeeds || loadingWeights || loadingTemps || loadingMists;
+  const hasError = feedsError || weightsError || tempsError || mistsError;
+  const preferredUnit = animal?.preferred_weight_unit || animal?.weight_unit || weightUnit || 'g';
 
   return (
     <div className="space-y-4 animate-in fade-in duration-300 pb-12">
       
-      {/* MINIMAL FILTER BAR */}
+      {/* FILTER BAR */}
       <div className="flex flex-col sm:flex-row gap-4 items-end">
         <div className="flex gap-4 w-full sm:w-auto">
           <div className="flex-1 sm:w-36">
@@ -86,21 +128,31 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
         </div>
         <div className="w-full sm:w-48 sm:ml-auto">
            <label className="block text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Log Type</label>
-           <select value={logFilter} onChange={(e) => setLogFilter(e.target.value as any)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500">
+           <select value={logFilter} onChange={(e) => setLogFilter(e.target.value as any)} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer">
              <option value="ALL">All Logs</option>
              <option value="FEEDING">Feeds</option>
              <option value="WEIGHT">Weights</option>
              <option value="TEMP">Temperatures</option>
+             <option value="MIST">Misting</option>
            </select>
         </div>
       </div>
 
       {isLoading ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-3"><Loader2 className="animate-spin text-emerald-500 w-8 h-8" /><span className="text-xs font-black uppercase tracking-widest text-slate-400">Compiling Telemetry...</span></div>
+        <div className="flex flex-col items-center justify-center py-20 gap-3">
+          <Loader2 className="animate-spin text-emerald-500 w-8 h-8" />
+          <span className="text-xs font-black uppercase tracking-widest text-slate-400">Compiling Telemetry...</span>
+        </div>
       ) : hasError ? (
-        <div className="flex flex-col items-center justify-center py-20 text-rose-500 gap-3"><AlertCircle size={32} /><span className="text-xs font-black uppercase tracking-widest">Error fetching logs.</span></div>
+        <div className="flex flex-col items-center justify-center py-20 text-rose-500 gap-3">
+          <AlertCircle size={32} />
+          <span className="text-xs font-black uppercase tracking-widest">Error fetching logs.</span>
+        </div>
       ) : unifiedTimeline.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3"><ClipboardList size={32} className="opacity-40" /><p className="text-[10px] font-bold uppercase tracking-widest mt-1">No telemetry matched these filters.</p></div>
+        <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3">
+          <ClipboardList size={32} className="opacity-40" />
+          <p className="text-[10px] font-bold uppercase tracking-widest mt-1">No telemetry matched these filters.</p>
+        </div>
       ) : (
         /* TABLE VIEW */
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
@@ -108,7 +160,7 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200">
-                  <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 whitespace-nowrap">Date & Time</th>
+                  <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 whitespace-nowrap">Date &amp; Time</th>
                   <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 whitespace-nowrap">Type</th>
                   <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 min-w-[200px]">Recorded Values</th>
                   <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-400 min-w-[200px]">Notes</th>
@@ -124,18 +176,27 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: Hu
 
                   if (item.type === 'FEEDING') {
                     typeBadge = <span className="text-[9px] font-black uppercase tracking-widest text-amber-600 bg-amber-50 px-2 py-1 rounded border border-amber-100">Feed</span>;
-                    const qty = item.data.quantity ? `(${item.data.quantity}${item.data.unit === 'grams' ? 'g' : ''})` : '';
-                    details = <span className="text-sm font-bold text-slate-800">{item.data.food_item || 'Standard Diet'} {qty}</span>;
+                    const qty = item.data.quantity_offered ?? item.data.quantity ?? '';
+                    const unit = item.data.quantity_unit ?? item.data.unit ?? '';
+                    const food = item.data.food_item || item.data.food_type || 'Standard Diet';
+                    const qtyDisplay = qty ? `(${qty}${unit ? ` ${unit}` : ''})` : '';
+                    details = <span className="text-sm font-bold text-slate-800">{food} {qtyDisplay}</span>;
                   } 
                   else if (item.type === 'WEIGHT') {
                     typeBadge = <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100">Weight</span>;
-                    details = <span className="text-sm font-black text-emerald-600">{item.data.weight_grams}g</span>;
+                    details = <span className="text-sm font-black text-emerald-600">{item.data.weight_grams}{preferredUnit}</span>;
                   } 
                   else if (item.type === 'TEMP') {
                     typeBadge = <span className="text-[9px] font-black uppercase tracking-widest text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100">Env</span>;
                     const tempDisplay = item.data.temp_ambient ? `Amb: ${item.data.temp_ambient}°C` : `Bask: ${item.data.temp_basking}°C | Cool: ${item.data.temp_cool}°C`;
                     const humDisplay = item.data.humidity_percent ? ` | Hum: ${item.data.humidity_percent}%` : '';
                     details = <span className="text-sm font-bold text-slate-800">{tempDisplay}{humDisplay}</span>;
+                  }
+                  else if (item.type === 'MIST') {
+                    typeBadge = <span className="text-[9px] font-black uppercase tracking-widest text-cyan-600 bg-cyan-50 px-2 py-1 rounded border border-cyan-100">Mist</span>;
+                    const level = item.data.mist_level ? `${item.data.mist_level.charAt(0).toUpperCase() + item.data.mist_level.slice(1).toLowerCase()} Spray` : 'Enclosure Misted';
+                    const shift = item.data.am_pm ? ` (${item.data.am_pm})` : '';
+                    details = <span className="text-sm font-bold text-slate-800">{level}{shift}</span>;
                   }
 
                   return (

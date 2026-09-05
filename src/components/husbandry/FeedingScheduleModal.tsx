@@ -1,351 +1,330 @@
-import React, { useState, useEffect } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Utensils, Calendar, X, Loader2, Sparkles } from 'lucide-react';
-import { format } from 'date-fns';
+import React from 'react';
+import { useForm } from '@tanstack/react-form';
+import { useMutation, useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { CalendarClock, Loader2, Utensils, RefreshCw, X, AlertCircle } from 'lucide-react';
+import { format, addDays, parseISO } from 'date-fns';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../lib/auth';
-import { FeedingSchedule, Animal, ScheduleStatus } from '../../types';
+import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../../types';
+import { feedingService } from '../../services/feedingService';
 
 interface FeedingScheduleModalProps {
   isOpen: boolean;
   onClose: () => void;
-  animal?: Animal | null;
-  animalId?: string;
-  initialData?: FeedingSchedule | null;
+  activeCategory: string;
 }
 
-const DAYS_OF_WEEK = [
-  { label: 'Mon', value: 'Monday' },
-  { label: 'Tue', value: 'Tuesday' },
-  { label: 'Wed', value: 'Wednesday' },
-  { label: 'Thu', value: 'Thursday' },
-  { label: 'Fri', value: 'Friday' },
-  { label: 'Sat', value: 'Saturday' },
-  { label: 'Sun', value: 'Sunday' },
-];
+const getAnimalsOptions = () => queryOptions({
+  queryKey: ['animals', 'dashboard'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
+    if (error) throw error;
+    return data as Animal[];
+  },
+  staleTime: 1000 * 60 * 5,
+  networkMode: 'offlineFirst',
+});
 
-export function FeedingScheduleModal({
-  isOpen,
-  onClose,
-  animal,
-  animalId,
-  initialData,
-}: FeedingScheduleModalProps) {
+const getFoodOptions = () => queryOptions({
+  queryKey: ['operational_lists', 'food_type'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('operational_lists')
+      .select('*')
+      .ilike('category', 'food_type')
+      .eq('is_deleted', false)
+      .order('name');
+    if (error) throw error;
+    return data as OperationalList[];
+  },
+  staleTime: 1000 * 60 * 5,
+  networkMode: 'offlineFirst',
+});
+
+const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
+
+export const FeedingScheduleModal: React.FC<FeedingScheduleModalProps> = ({ isOpen, onClose, activeCategory }) => {
   const queryClient = useQueryClient();
   const { user } = useAuth();
 
-  const targetAnimalId = animal?.id || animalId || initialData?.animal_id || '';
+  const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
+  const { data: foodOptions = [], isLoading: loadingFood } = useQuery(getFoodOptions());
 
-  const [form, setForm] = useState({
-    animal_id: targetAnimalId,
-    food_type: initialData?.food_type || 'Day-Old Chick',
-    quantity: initialData?.quantity ?? 1,
-    quantity_unit: initialData?.quantity_unit || 'item',
-    scheduled_date: initialData?.scheduled_date || format(new Date(), 'yyyy-MM-dd'),
-    schedule_mode: (initialData?.schedule_mode as 'DAILY' | 'CUSTOM_DAYS' | 'WEEKLY') || 'DAILY',
-    selected_days: Array.isArray(initialData?.selected_days) ? initialData.selected_days : [] as string[],
-    supplements: initialData?.supplements || '',
-    presentation_method: initialData?.presentation_method || 'Bowl / Dish',
-    notes: initialData?.notes || '',
-    calci_dust: Boolean(initialData?.calci_dust ?? initialData?.requires_calcidust ?? false),
-  });
+  const filteredAnimals = React.useMemo(() => 
+    animals.filter(a => (a.category || '').toUpperCase() === activeCategory),
+  [animals, activeCategory]);
 
-  useEffect(() => {
-    if (initialData) {
-      setForm({
-        animal_id: initialData.animal_id,
-        food_type: initialData.food_type || 'Day-Old Chick',
-        quantity: initialData.quantity ?? 1,
-        quantity_unit: initialData.quantity_unit || 'item',
-        scheduled_date: initialData.scheduled_date || format(new Date(), 'yyyy-MM-dd'),
-        schedule_mode: (initialData.schedule_mode as 'DAILY' | 'CUSTOM_DAYS' | 'WEEKLY') || 'DAILY',
-        selected_days: Array.isArray(initialData.selected_days) ? initialData.selected_days : [],
-        supplements: initialData.supplements || '',
-        presentation_method: initialData.presentation_method || 'Bowl / Dish',
-        notes: initialData.notes || '',
-        calci_dust: Boolean(initialData.calci_dust ?? initialData.requires_calcidust ?? false),
-      });
-    } else if (targetAnimalId) {
-      setForm(prev => ({ ...prev, animal_id: targetAnimalId }));
-    }
-  }, [initialData, targetAnimalId]);
+  const filteredFoodOptions = React.useMemo(() => 
+    foodOptions.filter((f: any) => 
+      !f.animal_category || String(f.animal_category).toUpperCase().includes(activeCategory)
+    ),
+  [foodOptions, activeCategory]);
 
-  const toggleDay = (day: string) => {
-    setForm(prev => {
-      const exists = prev.selected_days.includes(day);
-      return {
-        ...prev,
-        selected_days: exists
-          ? prev.selected_days.filter(d => d !== day)
-          : [...prev.selected_days, day]
-      };
-    });
-  };
+  const form = useForm({
+    defaultValues: {
+      animal_id: '',
+      food_type: '',
+      quantity: 1,
+      calci_dust: false,
+      feed_not_required: false,
+      schedule_mode: 'single' as 'single' | 'interval' | 'specific_days',
+      target_date: getLocalDateString(),
+      interval_value: 1,
+      interval_unit: 'days' as 'days' | 'weeks',
+      selected_days: [] as number[], // 0=Sun, 1=Mon, etc.
+      occurrences: 5
+    },
+    onSubmit: async ({ value }) => {
+      try {
+        if (!user?.id) throw new Error('You must be logged in to schedule diets.');
+        
+        let datesToSchedule: string[] = [];
 
-  const scheduleMutation = useMutation({
-    mutationFn: async (payload: typeof form) => {
-      const record = {
-        animal_id: payload.animal_id,
-        food_type: payload.food_type,
-        quantity: payload.quantity,
-        quantity_unit: payload.quantity_unit,
-        scheduled_date: payload.scheduled_date,
-        status: 'PENDING' as ScheduleStatus,
-        schedule_mode: payload.schedule_mode,
-        selected_days: payload.schedule_mode === 'CUSTOM_DAYS' ? payload.selected_days : null,
-        supplements: payload.supplements || null,
-        presentation_method: payload.presentation_method || null,
-        notes: payload.notes || null,
-        calci_dust: payload.calci_dust,
-        requires_calcidust: payload.calci_dust,
-        is_deleted: false,
-        created_by: user?.id || null
-      };
+        if (value.schedule_mode === 'single') {
+          datesToSchedule.push(value.target_date);
+        } else if (value.schedule_mode === 'interval') {
+          const startDate = parseISO(value.target_date);
+          const daysMultiplier = value.interval_unit === 'weeks' ? 7 : 1;
+          for (let i = 0; i < value.occurrences; i++) {
+            const nextFeedDate = addDays(startDate, i * value.interval_value * daysMultiplier);
+            datesToSchedule.push(format(nextFeedDate, 'yyyy-MM-dd'));
+          }
+        } else if (value.schedule_mode === 'specific_days') {
+          const startDate = parseISO(value.target_date);
+          if (value.selected_days.length === 0) throw new Error("Please select at least one day of the week.");
+          
+          let currentDate = startDate;
+          let added = 0;
+          let iterations = 0; // Safeguard circuit breaker
+          
+          while (added < value.occurrences && iterations < 365) {
+            if (value.selected_days.includes(currentDate.getDay())) {
+              datesToSchedule.push(format(currentDate, 'yyyy-MM-dd'));
+              added++;
+            }
+            currentDate = addDays(currentDate, 1);
+            iterations++;
+          }
+        }
 
-      if (initialData?.id) {
-        const { data, error } = await supabase
-          .from('feeding_schedules')
-          .update(record)
-          .eq('id', initialData.id)
-          .select()
-          .single();
-        if (error) throw error;
-        return data;
-      } else {
-        const { data, error } = await supabase
-          .from('feeding_schedules')
-          .insert([record])
-          .select()
-          .single();
-        if (error) throw error;
-        return data;
+        // Schema-validated payload matching feeding_schedules table
+        const newSchedules: Partial<FeedingScheduleType>[] = datesToSchedule.map(date => ({
+          animal_id: value.animal_id,
+          scheduled_date: date,
+          food_type: value.feed_not_required ? 'NOT REQUIRED' : value.food_type,
+          quantity: value.feed_not_required ? 0 : value.quantity,
+          quantity_unit: 'item',
+          status: 'PENDING',
+          supplements: value.calci_dust ? 'Calci-Dust' : null,
+          notes: value.feed_not_required ? 'FAST DAY / NOT REQUIRED' : null,
+          presentation_method: null,
+          is_deleted: false,
+          created_by: user.id
+        }));
+
+        await feedingService.bulkCreateSchedules(newSchedules as any, user.id);
+        queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+        toast.success('Feeding schedule generated!');
+        form.reset();
+        onClose();
+      } catch (err: any) {
+        toast.error(`Generation failed: ${err.message}`);
       }
-    },
-    onSuccess: () => {
-      toast.success(initialData?.id ? 'Feeding schedule updated.' : 'Feeding schedule item created.');
-      queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
-      queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
-      onClose();
-    },
-    onError: (err: any) => {
-      toast.error(`Failed to save schedule: ${err.message}`);
     }
   });
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.animal_id) {
-      return toast.error('Animal ID is required to schedule feeding.');
-    }
-    scheduleMutation.mutate(form);
-  };
 
   if (!isOpen) return null;
 
+  const inputClass = "w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all shadow-sm";
+
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] font-sans">
-        <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
-          <h3 className="font-black text-slate-900 uppercase tracking-widest text-xs flex items-center gap-2">
-            <Utensils size={15} className="text-slate-700" />
-            {initialData ? 'Edit Feeding Schedule' : 'Create Feeding Schedule'}
-            {animal?.name && <span className="text-emerald-600">— {animal.name}</span>}
-          </h3>
-          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-700 rounded-lg">
-            <X size={18} />
+    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+      <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-xl border border-slate-100 flex flex-col my-8">
+        
+        {/* Header */}
+        <div className="p-4 md:p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/80">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-sm">
+              <Utensils size={18} className="text-emerald-400" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-900 text-sm md:text-base tracking-tight">Generate Diet Schedule</h3>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mt-0.5">Category: {activeCategory}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 p-2 hover:bg-slate-100 rounded-lg transition-colors">
+            <X size={20} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-5 overflow-y-auto custom-scrollbar space-y-4 text-xs font-medium">
+        {/* Form Body */}
+        <form onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="p-4 md:p-6 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
           
-          {/* Schedule Frequency Mode */}
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-              Schedule Recurrence
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              {(['DAILY', 'CUSTOM_DAYS', 'WEEKLY'] as const).map(mode => (
-                <button
-                  type="button"
-                  key={mode}
-                  onClick={() => setForm(prev => ({ ...prev, schedule_mode: mode }))}
-                  className={`py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border ${
-                    form.schedule_mode === mode
-                      ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  {mode.replace(/_/g, ' ')}
-                </button>
-              ))}
+          <form.Field name="animal_id" children={(field) => (
+            <div>
+              <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Animal / Collection *</label>
+              <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingAnimals} required>
+                <option value="">{loadingAnimals ? 'Loading animals...' : 'Select Animal...'}</option>
+                {filteredAnimals.map(a => <option key={a.id} value={a.id!}>{a.name} ({a.species})</option>)}
+              </select>
             </div>
-          </div>
+          )}/>
 
-          {/* Day selection when in CUSTOM_DAYS mode */}
-          {form.schedule_mode === 'CUSTOM_DAYS' && (
-            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-1.5">
-              <span className="block text-[9px] font-black uppercase tracking-widest text-slate-500">
-                Select Feeding Days
-              </span>
-              <div className="flex gap-1.5 flex-wrap">
-                {DAYS_OF_WEEK.map(d => {
-                  const isSelected = form.selected_days.includes(d.value);
-                  return (
-                    <button
-                      type="button"
-                      key={d.value}
-                      onClick={() => toggleDay(d.value)}
-                      className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${
-                        isSelected
-                          ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                      }`}
-                    >
-                      {d.label}
-                    </button>
-                  );
-                })}
+          <form.Field name="feed_not_required" children={(field) => (
+            <div className="flex items-center gap-3 bg-rose-50/80 p-3 rounded-xl border border-rose-200 cursor-pointer" onClick={() => field.handleChange(!field.state.value)}>
+              <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-rose-600 bg-white rounded border-rose-300 focus:ring-rose-500/50" />
+              <span className="text-xs font-bold text-rose-700 uppercase tracking-widest">Fast Day / Not Required</span>
+            </div>
+          )}/>
+
+          <form.Subscribe selector={(state) => state.values.feed_not_required} children={(notRequired) => (
+            !notRequired ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <form.Field name="food_type" children={(field) => (
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Food Type *</label>
+                      {filteredFoodOptions.length > 0 ? (
+                        <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingFood} required>
+                          <option value="">{loadingFood ? 'Loading...' : 'Select...'}</option>
+                          {filteredFoodOptions.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                        </select>
+                      ) : (
+                        <input value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} placeholder="E.g. Mice" required />
+                      )}
+                    </div>
+                  )}/>
+                  <form.Field name="quantity" children={(field) => (
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Quantity *</label>
+                      <input type="number" step="0.1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseFloat(e.target.value))} className={inputClass} required />
+                    </div>
+                  )}/>
+                </div>
+
+                <form.Field name="calci_dust" children={(field) => (
+                  <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200 cursor-pointer" onClick={() => field.handleChange(!field.state.value)}>
+                    <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-emerald-600 bg-white rounded border-slate-300 focus:ring-emerald-500/50" />
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Include Calci-Dust Supplement</span>
+                  </div>
+                )}/>
+              </>
+            ) : null
+          )}/>
+
+          <div className="pt-3 border-t border-slate-100">
+            <form.Field name="schedule_mode" children={(field) => (
+              <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200/80 mb-4">
+                <button type="button" onClick={() => field.handleChange('single')} className={`flex-1 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${field.state.value === 'single' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}>Single</button>
+                <button type="button" onClick={() => field.handleChange('interval')} className={`flex-1 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-1.5 ${field.state.value === 'interval' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}><RefreshCw size={12}/> Interval</button>
+                <button type="button" onClick={() => field.handleChange('specific_days')} className={`flex-1 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-1.5 ${field.state.value === 'specific_days' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}><CalendarClock size={12}/> Set Days</button>
               </div>
-            </div>
-          )}
+            )}/>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Scheduled Date *
-              </label>
-              <input
-                type="date"
-                required
-                value={form.scheduled_date}
-                onChange={(e) => setForm(prev => ({ ...prev, scheduled_date: e.target.value }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
+            <form.Subscribe selector={(state) => state.values.schedule_mode} children={(mode) => (
+              <div className="space-y-4 bg-slate-50/80 p-4 rounded-xl border border-slate-200/80">
+                <form.Field name="target_date" children={(field) => (
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1 ml-1">{mode === 'single' ? 'Target Date' : 'Start Date'} *</label>
+                    <input type="date" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required/>
+                  </div>
+                )}/>
+                
+                {mode === 'interval' && (
+                  <div className="grid grid-cols-2 gap-3 pt-1 border-t border-slate-200/50">
+                    <div className="col-span-2 flex gap-3">
+                      <form.Field name="interval_value" children={(field) => (
+                        <div className="flex-1">
+                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1 ml-1">Repeat Every</label>
+                          <input type="number" min="1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                        </div>
+                      )}/>
+                      <form.Field name="interval_unit" children={(field) => (
+                        <div className="flex-[2]">
+                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1 ml-1">Unit</label>
+                          <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                            <option value="days">Days</option>
+                            <option value="weeks">Weeks</option>
+                          </select>
+                        </div>
+                      )}/>
+                    </div>
+                    <form.Field name="occurrences" children={(field) => (
+                      <div className="col-span-2 mt-1">
+                        <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1 ml-1">Total Occurrences</label>
+                        <input type="number" min="1" max="100" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                      </div>
+                    )}/>
+                  </div>
+                )}
 
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Quantity *
-              </label>
-              <input
-                type="number"
-                min="0.1"
-                step="any"
-                required
-                value={form.quantity}
-                onChange={(e) => setForm(prev => ({ ...prev, quantity: parseFloat(e.target.value) || 1 }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
+                {mode === 'specific_days' && (
+                  <div className="pt-1 border-t border-slate-200/50">
+                    <form.Field name="selected_days" children={(field) => {
+                      const days = [
+                        { label: 'M', value: 1 }, { label: 'T', value: 2 }, { label: 'W', value: 3 },
+                        { label: 'T', value: 4 }, { label: 'F', value: 5 }, { label: 'S', value: 6 }, { label: 'S', value: 0 }
+                      ];
+                      
+                      const toggleDay = (val: number) => {
+                        const current = field.state.value as number[];
+                        if (current.includes(val)) {
+                          field.handleChange(current.filter(d => d !== val));
+                        } else {
+                          field.handleChange([...current, val]);
+                        }
+                      };
+
+                      return (
+                        <div className="mb-4">
+                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Select Feed Days *</label>
+                          <div className="flex gap-1.5 justify-between">
+                            {days.map((d, i) => {
+                              const isSelected = (field.state.value as number[]).includes(d.value);
+                              return (
+                                <button 
+                                  key={i} 
+                                  type="button" 
+                                  onClick={() => toggleDay(d.value)}
+                                  className={`w-10 h-10 rounded-xl font-black text-xs transition-all border ${isSelected ? 'bg-emerald-600 text-white border-emerald-700 shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50 hover:border-slate-300'}`}
+                                >
+                                  {d.label}
+                                </button>
+                              )
+                            })}
+                          </div>
+                          {field.state.value.length === 0 && <p className="text-[10px] text-rose-500 font-bold mt-2 flex items-center gap-1"><AlertCircle size={12}/> Select at least one day.</p>}
+                        </div>
+                      )
+                    }}/>
+                    <form.Field name="occurrences" children={(field) => (
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1 ml-1">Total Feeds to Schedule</label>
+                        <input type="number" min="1" max="150" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                      </div>
+                    )}/>
+                  </div>
+                )}
+              </div>
+            )}/>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Food Type *
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Day-Old Chick / Quail / Mice"
-                value={form.food_type}
-                onChange={(e) => setForm(prev => ({ ...prev, food_type: e.target.value }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Unit
-              </label>
-              <input
-                type="text"
-                placeholder="item / g / whole"
-                value={form.quantity_unit}
-                onChange={(e) => setForm(prev => ({ ...prev, quantity_unit: e.target.value }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Supplements (Optional)
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. Avipro / Nutrobal"
-                value={form.supplements}
-                onChange={(e) => setForm(prev => ({ ...prev, supplements: e.target.value }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-                Presentation Method
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. Hand feed / Glove / Scatter"
-                value={form.presentation_method}
-                onChange={(e) => setForm(prev => ({ ...prev, presentation_method: e.target.value }))}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-              />
-            </div>
-          </div>
-
-          {/* CalciDust Toggle */}
-          <div className="flex items-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              id="calci_dust_modal"
-              checked={form.calci_dust}
-              onChange={(e) => setForm(prev => ({ ...prev, calci_dust: e.target.checked }))}
-              className="rounded border-slate-300 text-slate-900 focus:ring-slate-900 h-4 w-4 cursor-pointer"
-            />
-            <label htmlFor="calci_dust_modal" className="text-xs font-bold text-slate-700 cursor-pointer flex items-center gap-1">
-              <Sparkles size={13} className="text-amber-500" />
-              Requires CalciDust / Nutritional Calcium Supplement
-            </label>
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
-              Husbandry / Diet Notes
-            </label>
-            <textarea
-              rows={2}
-              placeholder="e.g. Remove head from chick, dust thorax..."
-              value={form.notes}
-              onChange={(e) => setForm(prev => ({ ...prev, notes: e.target.value }))}
-              className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-medium text-slate-900 focus:ring-2 focus:ring-slate-900 outline-none"
-            />
-          </div>
-
-          <div className="pt-2 flex justify-end gap-2 border-t border-slate-100">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-xl uppercase tracking-widest"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={scheduleMutation.isPending}
-              className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 flex items-center gap-2 shadow-sm"
-            >
-              {scheduleMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-              <span>Save Schedule</span>
-            </button>
+          <div className="pt-2 flex gap-2.5">
+            <button type="button" onClick={onClose} className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors">Cancel</button>
+            <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting, state.values]} children={([canSubmit, isSubmitting, values]) => {
+              // Block submission if specific days mode is selected but no days are chosen
+              const disableSubmit = !canSubmit || (isSubmitting as boolean) || (values.schedule_mode === 'specific_days' && values.selected_days.length === 0);
+              return (
+                <button type="submit" disabled={disableSubmit} className="flex-[2] bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md flex items-center justify-center gap-2 active:scale-[0.99]">
+                  {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <CalendarClock size={16} />}
+                  {isSubmitting ? 'SCHEDULING...' : 'CONFIRM SCHEDULE'}
+                </button>
+              )
+            }}/>
           </div>
         </form>
       </div>
     </div>
   );
-}
-
-export default FeedingScheduleModal;
+};

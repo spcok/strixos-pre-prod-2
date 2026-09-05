@@ -8,11 +8,68 @@
     />
     <title>StrixOS</title>
 
-    <!-- PWA Web App Manifest (Cache-Busted for Android WebAPK refresh) & App Icons -->
-    <link rel="manifest" href="/manifest.json?v=4" />
+    <!-- EMERGENCY CACHE & SERVICE WORKER PURGE HOOK -->
+    <script>
+      (function() {
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('reset') || urlParams.has('reinstall') || urlParams.has('purge')) {
+          console.warn('Executing emergency cache & storage purge...');
+          
+          // 1. Unregister all active Service Workers
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+              for (var i = 0; i < regs.length; i++) {
+                regs[i].unregister();
+              }
+            });
+          }
+
+          // 2. Delete all CacheStorage keys
+          if ('caches' in window) {
+            caches.keys().then(function(names) {
+              for (var i = 0; i < names.length; i++) {
+                caches.delete(names[i]);
+              }
+            });
+          }
+
+          // 3. Clear LocalStorage and SessionStorage
+          try {
+            localStorage.clear();
+            sessionStorage.clear();
+          } catch(e) {}
+
+          // 4. Delete IndexedDB databases
+          if (window.indexedDB && indexedDB.databases) {
+            indexedDB.databases().then(function(dbs) {
+              for (var i = 0; i < dbs.length; i++) {
+                if (dbs[i].name) indexedDB.deleteDatabase(dbs[i].name);
+              }
+            });
+          }
+
+          // 5. Expire document cookies
+          var cookies = document.cookie.split(";");
+          for (var i = 0; i < cookies.length; i++) {
+            var cookie = cookies[i];
+            var eqPos = cookie.indexOf("=");
+            var name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
+            document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/";
+          }
+
+          // 6. Clean reload without query parameter
+          setTimeout(function() {
+            window.location.replace(window.location.origin + window.location.pathname);
+          }, 350);
+        }
+      })();
+    </script>
+
+    <!-- PWA Web App Manifest & App Icons -->
+    <link rel="manifest" href="/manifest.json?v=5" />
     <meta name="theme-color" content="#ffffff" />
-    <link rel="icon" type="image/png" href="/logo192.png?v=2" />
-    <link rel="apple-touch-icon" href="/logo192.png?v=2" />
+    <link rel="icon" type="image/png" href="/logo192.png?v=3" />
+    <link rel="apple-touch-icon" href="/logo192.png?v=3" />
 
     <!-- iOS / Safari Standalone Configuration -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -22,7 +79,7 @@
     <!-- Android / Chrome Standalone Configuration -->
     <meta name="mobile-web-app-capable" content="yes" />
 
-    <!-- Instant Bootloader Inline Styles (Zero Latency & Safe Area Aware) -->
+    <!-- Instant Bootloader Inline Styles -->
     <style>
       html, body {
         margin: 0;
@@ -104,7 +161,7 @@
       <!-- Instant Pre-React Boot Screen -->
       <div id="boot-splash">
         <div class="boot-logo-container">
-          <img src="/logo192.png?v=2" alt="StrixOS Logo" class="boot-logo" />
+          <img src="/logo192.png?v=3" alt="StrixOS Logo" class="boot-logo" />
         </div>
         <div class="boot-title">StrixOS</div>
         <div class="boot-subtitle">Avian Management</div>
